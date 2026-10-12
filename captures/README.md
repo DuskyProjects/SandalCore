@@ -10,14 +10,13 @@ Community packet captures of the Ashes of Creation client talking to the game se
 | Set | Files | Size (MB) | Details |
 |---|---:|---:|---|
 | `creation-of-ashes/` | 1106 | ~213 MB | 1,105 unique `.pcap` packet captures + community README |
-| `hexdumps.zip` | 1 | 152.2 MB | 996 `.txt` reconstructed packet hexdumps (compressed) |
-| **Total** | **1107** | **~365 MB** | Full community capture archive |
+| `hexdumps.zip` (separate download) | 1 | 152.2 MB | 996 `.txt` reconstructed packet hexdumps (compressed) |
 
-The total repository capture footprint is ~365 MB to keep the repository well within GitHub's recommended size limits. Duplicate captures have been deduplicated, and raw `.txt` hexdumps are stored compressed in `hexdumps.zip` (can be unzipped in-place if needed).
+The captures in this folder take about 213 MB; duplicate captures have been removed. The 996 text hexdumps are too big for the repository (GitHub limits files to 100 MB), so `hexdumps.zip` is a separate download on the [navmesh-v1 release](https://github.com/cyborqz/SandalCore/releases/tag/navmesh-v1). Download it and unzip it into this `captures/` folder if you want them; you only need them to read packets without Wireshark.
 
 ### `creation-of-ashes/` by top-level folder
 
-| Folder | `.pcap` files | `.pcap` MB | `.txt` hexdumps (in `hexdumps.zip`) |
+| Folder | `.pcap` files | `.pcap` MB | `.txt` hexdumps (in `hexdumps.zip`, release download) |
 |---|---:|---:|---:|
 | `Classes/` | 395 | 55.3 | 429 |
 | `Geode/` | 1 | 2.1 | 1 |

@@ -121,7 +121,7 @@ Key runtime environment variables and settings include:
 
 ## Captures
 
-The repository includes a curated collection of anonymized packet captures and reconstructed hexdumps used for wire-format validation, replay diffing, and schema generation.
+The repository includes a curated collection of anonymized packet captures used for wire-format validation, replay diffing, and schema generation. Their text hexdumps (`hexdumps.zip`, 152 MB) are a separate download on the [navmesh-v1 release](https://github.com/cyborqz/SandalCore/releases/tag/navmesh-v1).
 
 For details on the capture format, organization, and verification, see [`captures/README.md`](captures/README.md).
 
