@@ -1,0 +1,141 @@
+blueprint	kind	parents	max_walk_speed	max_run_speed	max_fly_speed	max_swim_speed	defaults
+MonsterCoin_Ancients_Leader		MonsterCoin_Base_C,Mount_Base_C	220	600	600	400	fly
+MonsterCoin_Base		Mount_Base_C	220	600	600	400	fly
+Mount_Aquatic_Base	Aquatic	Mount_Base_C	220	600	600	520	fly
+Mount_Aquatic_Shoalskipper_0	Aquatic	Mount_Aquatic_Base_C,Mount_Base_C	220	599	600	920	fly
+Mount_Aquatic_Shoalskipper_1_ALT	Aquatic	Mount_Aquatic_Shoalskipper_0_C,Mount_Aquatic_Base_C,Mount_Base_C	220	599	600	920	fly
+Mount_Aquatic_Tidesnapper_0	Aquatic	Mount_Aquatic_Base_C,Mount_Base_C	220	599	600	800	fly
+Mount_Aquatic_Tidesnapper_1_ALT	Aquatic	Mount_Aquatic_Tidesnapper_0_C,Mount_Aquatic_Base_C,Mount_Base_C	220	599	600	800	fly
+Mount_Base			600	600	600	300	walk,run,fly,swim
+Mount_Flying_ArcticProwler	Grounded	Mount_Grounded_CursedCharger_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Flying_Base	Flying	Mount_Base_C	220	600	800	400	
+Mount_Flying_Dawnbreaker_0	Flying	Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Dawnbreaker_1	Flying	Mount_Flying_Dawnbreaker_0_C,Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Dawnbreaker_2	Flying	Mount_Flying_Dawnbreaker_0_C,Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Dawnbreaker_3	Flying	Mount_Flying_Dawnbreaker_0_C,Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_DrakeOfTheCanopy_0	Flying	Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Gryphon_0	Flying	Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Gryphon_1	Flying	Mount_Flying_Gryphon_0_C,Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Gryphon_2	Flying	Mount_Flying_Gryphon_0_C,Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Gryphon_3	Flying	Mount_Flying_Gryphon_0_C,Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Gryphon_3_Armored	Flying	Mount_Flying_Base_C,Mount_Base_C	220	600	800	400	
+Mount_Flying_Gryphon_4	Flying	Mount_Flying_Gryphon_0_C,Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Gryphon_5	Flying	Mount_Flying_Gryphon_0_C,Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Gryphon_5_Armored	Flying	Mount_Flying_Base_C,Mount_Base_C	220	600	800	400	
+Mount_Flying_Gryphon_6	Flying	Mount_Flying_Gryphon_0_C,Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Gryphon_7	Flying	Mount_Flying_Gryphon_0_C,Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Gryphon_8	Flying	Mount_Flying_Gryphon_0_C,Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Hippogriff_0	Flying	Mount_Flying_Base_C,Mount_Base_C	220	600	800	400	
+Mount_Flying_Hippogriff_1	Flying	Mount_Flying_Base_C,Mount_Base_C	220	600	800	400	
+Mount_Flying_Hippogriff_2	Flying	Mount_Flying_Base_C,Mount_Base_C	220	600	800	400	
+Mount_Flying_Pridestrider_0	Flying	Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Pridestrider_1	Flying	Mount_Flying_Pridestrider_0_C,Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Pridestrider_2	Flying	Mount_Flying_Pridestrider_0_C,Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Pridestrider_3	Flying	Mount_Flying_Pridestrider_0_C,Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_ThunderingBoltBeast_0	Flying	Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_ThunderingBoltBeast_1	Flying	Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_VeteranAuriteDrake_0	Flying	Mount_Flying_Base_C,Mount_Base_C	220	600	800	400	
+Mount_Flying_Wyrmling_0	Flying	Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Wyrmling_1	Flying	Mount_Flying_Wyrmling_0_C,Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Flying_Wyrmling_4	Flying	Mount_Flying_Wyrmling_0_C,Mount_Flying_Base_C,Mount_Base_C	220	990	1290	400	
+Mount_Gliding_Base	Gliding	Mount_Base_C	220	220	2500	400	run
+Mount_Gliding_Wyrmling_0	Gliding	Mount_Gliding_Base_C,Mount_Base_C	220	220	2500	400	run
+Mount_Grounded_AlpineBaghorn_0	Grounded	Mount_Grounded_Daystrider_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	900	600	400	fly
+Mount_Grounded_AmethystBoughbite_0	Grounded	Mount_Grounded_Daystrider_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	900	600	400	fly
+Mount_Grounded_Base	Grounded	Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_Bear_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	840	600	400	fly
+Mount_Grounded_BeardedBalemane_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_BloomfestLancer_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	810	600	400	fly
+Mount_Grounded_BoneStrider	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	930	600	400	fly
+Mount_Grounded_BoneStrider_1_ALT	Grounded	Mount_Grounded_BoneStrider_C,Mount_Grounded_Base_C,Mount_Base_C	220	930	600	400	fly
+Mount_Grounded_Bork_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1050	600	500	fly
+Mount_Grounded_BoulderstoneBulldog_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1050	600	500	fly
+Mount_Grounded_BrewBear	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1050	600	600	fly
+Mount_Grounded_CarmineChameleon_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1050	600	500	fly
+Mount_Grounded_CinderhornSteer_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1150	600	550	fly
+Mount_Grounded_CorralesFox_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1250	600	400	fly
+Mount_Grounded_Croc_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	900	600	440	fly
+Mount_Grounded_CursedCharger_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_Daystrider_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	900	600	400	fly
+Mount_Grounded_Daystrider_1	Grounded	Mount_Grounded_Daystrider_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	900	600	400	fly
+Mount_Grounded_Deer_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_Dredgehorn	Grounded	Mount_Grounded_Base_C,Mount_Base_C	300	1050	600	500	fly
+Mount_Grounded_Dredgehorn_1	Grounded	Mount_Grounded_Base_C,Mount_Base_C	300	1050	600	500	fly
+Mount_Grounded_DrillSpider_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	500	fly
+Mount_Grounded_DynastyBeetle	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_EbonOmen_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	990	600	400	fly
+Mount_Grounded_FelgazStalker_0	Grounded	Mount_Grounded_CursedCharger_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	1050	600	400	fly
+Mount_Grounded_Flailrunner_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1020	600	400	fly
+Mount_Grounded_FoxOfThePyre_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1250	600	400	fly
+Mount_Grounded_FrayedCopse_0	Grounded	Mount_Grounded_Stallion_Armored_C,Mount_Grounded_Base_C,Mount_Base_C	220	1050	600	400	fly
+Mount_Grounded_GiantBullywog_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	300	1050	600	500	fly
+Mount_Grounded_GlimmeringGeode_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_GoldenBeetle1	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_GraveBeast_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1050	600	500	fly
+Mount_Grounded_GraveyardGolem_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1050	600	500	fly
+Mount_Grounded_Guarden_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1050	600	500	fly
+Mount_Grounded_Guarden_Autumn	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1050	600	500	fly
+Mount_Grounded_Hippo	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	870	600	480	fly
+Mount_Grounded_Horse_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	810	600	400	fly
+Mount_Grounded_Horse_1	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	810	600	400	fly
+Mount_Grounded_Horse_2	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	810	600	400	fly
+Mount_Grounded_Horse_3	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	810	600	400	fly
+Mount_Grounded_Horse_4	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	810	600	400	fly
+Mount_Grounded_HowlingRidgeOx	Grounded	Mount_Grounded_CinderhornSteer_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	1150	600	550	fly
+Mount_Grounded_JadedDrudger_0	Grounded	Mount_Grounded_Ramstrider_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	600	600	550	fly
+Mount_Grounded_Kirin_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1400	600	500	fly
+Mount_Grounded_Kirin_1	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1350	600	800	fly
+Mount_Grounded_LightfootLeverit_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1050	600	500	fly
+Mount_Grounded_MaelstromsCrown_0	Grounded	Mount_Grounded_GlimmeringGeode_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_MidnightMare_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_Moonstrider_0	Grounded	Mount_Grounded_Daystrider_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	900	600	400	fly
+Mount_Grounded_Mule_AlpineBaghorn	Grounded	Mount_Grounded_Mule_Base_C,Mount_Grounded_Base_C,Mount_Base_C	220	720	600	400	fly
+Mount_Grounded_Mule_Base	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_Mule_Daystrider	Grounded	Mount_Grounded_Mule_Base_C,Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_Mule_Moonstrider	Grounded	Mount_Grounded_Mule_Base_C,Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_NobleWarhorn_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1250	600	500	fly
+Mount_Grounded_Oathbearer_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_ObsidianStallion_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_Otter_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	700	fly
+Mount_Grounded_Otter_1	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	700	fly
+Mount_Grounded_Otter_2	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	700	fly
+Mount_Grounded_Otter_3	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	700	fly
+Mount_Grounded_PallasCat_0	Grounded	Mount_Grounded_CursedCharger_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	870	600	400	fly
+Mount_Grounded_PlumedHalberdier_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_ProtectorsPride_0	Grounded	Mount_Grounded_CursedCharger_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	1050	600	400	fly
+Mount_Grounded_ProtectorsPride_1_ALT	Grounded	Mount_Grounded_ProtectorsPride_0_C,Mount_Grounded_CursedCharger_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	1050	600	400	fly
+Mount_Grounded_ProwlerOfPerdition_0	Grounded	Mount_Grounded_CursedCharger_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_Ram_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	810	600	400	fly
+Mount_Grounded_Ramstrider_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	550	fly
+Mount_Grounded_Raptor_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	930	600	400	fly
+Mount_Grounded_Raptor_Armored	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	930	600	400	fly
+Mount_Grounded_RisenGuardian_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1150	600	500	fly
+Mount_Grounded_RunicSteed_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_Saltspine_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	990	600	480	fly
+Mount_Grounded_Scalerunner_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	990	600	480	fly
+Mount_Grounded_Scalerunner_1_ALT	Grounded	Mount_Grounded_Scalerunner_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	990	600	480	fly
+Mount_Grounded_ScorpionBroodling_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	990	600	400	fly
+Mount_Grounded_Scorpion_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	960	600	400	fly
+Mount_Grounded_Scorpion_1	Grounded	Mount_Grounded_Scorpion_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	960	600	400	fly
+Mount_Grounded_Scorpix_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	990	600	400	fly
+Mount_Grounded_Scorpix_1	Grounded	Mount_Grounded_Scorpix_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	990	600	400	fly
+Mount_Grounded_SeatOfAelindor	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_ShatterClaw_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_ShellOfTheAncients_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_SilkfurDunehunter_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1250	600	400	fly
+Mount_Grounded_Skinwalker_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	900	600	400	fly
+Mount_Grounded_Spider_1	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	500	fly
+Mount_Grounded_StagOfBoughs_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1150	600	500	fly
+Mount_Grounded_StallionPrime_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1050	600	400	fly
+Mount_Grounded_StallionPrime_1	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1050	600	400	fly
+Mount_Grounded_Stallion_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1050	600	400	fly
+Mount_Grounded_Stallion_Armored	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	1050	600	400	fly
+Mount_Grounded_StormsnapperRangefinder_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_TerrorBird_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	990	600	400	fly
+Mount_Grounded_Tidebreaker_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	720	600	640	fly
+Mount_Grounded_Tidebreaker_1_ALT	Grounded	Mount_Grounded_Tidebreaker_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	720	600	640	fly
+Mount_Grounded_TimelessTerrapin_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	400	fly
+Mount_Grounded_VerdantVoyager_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	780	600	760	fly
+Mount_Grounded_VeshanKomodo_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	600	600	520	fly
+Mount_Grounded_WispWhelk_0	Grounded	Mount_Grounded_Daystrider_0_C,Mount_Grounded_Base_C,Mount_Base_C	220	900	600	400	fly
+Mount_Grounded_Wolf_0	Grounded	Mount_Grounded_Base_C,Mount_Base_C	220	870	600	400	fly

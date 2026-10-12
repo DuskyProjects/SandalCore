@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "asset": "sandal-core-navmesh-v1.zip",
+  "url": "https://github.com/cyborqz/SandalCore/releases/download/navmesh-v1/sandal-core-navmesh-v1.zip",
+  "zip_sha256": "1c99734a5ea390d733ea0cf9961b676ec06d890f287f5941f15926fbe970708d",
+  "zip_size": 478030609,
+  "files": {
+    "area_nav.bin": "4b7f7441a5c1e0d871009d80d76398753aca89d460d6fac90d788cba26519336",
+    "area_geom.bin": "2b5ac3f275efbe50efdc4d24f7a052110f6635356eb573726dae6bf402696d88"
+  }
+}
