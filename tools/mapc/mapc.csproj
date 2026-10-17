@@ -44,5 +44,11 @@
     <PackageReference Include="VGAudio" Version="2.2.1" />
     <PackageReference Include="Zlib-ng.NET" Version="1.2.0" />
     <PackageReference Include="ZstdSharp.Port" Version="0.8.6" />
+    <!-- Pin patched transitive dependencies brought in by FixedMathSharp,
+         Fmod5Sharp and legacy NETStandard packages. -->
+    <PackageReference Include="MessagePack" Version="3.1.12" />
+    <PackageReference Include="System.Net.Http" Version="4.3.4" />
+    <PackageReference Include="System.Text.Json" Version="8.0.6" />
+    <PackageReference Include="System.Text.RegularExpressions" Version="4.3.1" />
   </ItemGroup>
 </Project>

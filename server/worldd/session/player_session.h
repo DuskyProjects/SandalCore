@@ -518,6 +518,10 @@ public:
     size_t   harvest_piles() const { return harvest_piles_; }
     size_t progress_handed_over() const { return progress_handed_over_; }
     bool   progress_changed() const { return progress_changed_; }
+    /// The live state saved by SaveProgress and carried into a replacement session.
+    svc::Progress progress_snapshot() const;
+    /// A replacement carries progress whose previous save may still be queued or may have failed.
+    void progress_may_be_unsaved() { progress_changed_ = true; }
     /// Plan D1, stage 2: the character's ranks (null when the world has no talents catalog), its action bar, the KnownAbilities and the
     /// ReplicatedRecordsToLoad as the client was told, the purchase requests applied and refused, the slot sets applied and refused, the weapon
     /// swaps, and the regeneration ticks that changed Health or Mana.
@@ -803,6 +807,8 @@ private:
                      std::vector<protocol::repl::SkillOnActionbar>& updates);
     /// The effect item a rank's passive effect gets (nothing when the rank has none, or for a weapon rank of a line that is not in hand).
     void add_rank_effect(const talents::RankRef& ref, Clock::time_point now, bootstrap::AbilityChange& effects);
+    /// Restore persistent rank items at login and reconcile them when ranks or the wielded weapon change. Finite grant markers are not replayed.
+    bool sync_persistent_rank_effects(double session_time);
     /// Removes the item the session added for a rank's effect, if it still has one.
     void remove_rank_effect(int64_t rank_guid, bootstrap::AbilityChange& effects);
     /// Whether the weapon line in hand or the rank constants changed what the stats are computed from: refreshes the stats' extra mods.

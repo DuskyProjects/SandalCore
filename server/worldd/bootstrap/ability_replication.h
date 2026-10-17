@@ -62,6 +62,8 @@ struct EffectItem {
     float   duration = 0;        // Items.Duration; 3.40282347e+38 (FLT_MAX) for an infinite effect
     float   tick_time = 0;       // Items.TickTime: the effect's TickTimer (0 for none)
     int32_t stacks = 1;          // Items.CurrentStacks
+    /// An effect delivered by another character retains that character as its instigator and source.
+    std::optional<std::array<uint32_t, 4>> instigator_character_guid;
 };
 
 /// A ReplicatedActiveAbilities item.  Instigator is the pawn; Targets is the pawn's CollisionCylinder when targets_self.

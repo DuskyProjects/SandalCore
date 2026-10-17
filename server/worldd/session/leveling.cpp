@@ -81,8 +81,14 @@ std::optional<int64_t> scroll_xp(const LevelCurve& curve, int target_level, cons
 Progress with_death_debt(const LevelCurve& curve, const Progress& p, double share) {
     Progress out = p;
     const int64_t span = curve.span_of(p.level);
+    out.debt = std::clamp<int64_t>(p.debt, 0, span);
+    if (!(share > 0)) return out;
+    if (share >= 1) {
+        out.debt = span;
+        return out;
+    }
     const int64_t add = static_cast<int64_t>(std::llround(static_cast<double>(span) * share));
-    out.debt = std::min<int64_t>(span, std::max<int64_t>(0, p.debt) + std::max<int64_t>(0, add));
+    out.debt += std::min(span - out.debt, add);
     return out;
 }
 

@@ -47,6 +47,9 @@ public:
     /// Per-actor: which clients currently see this actor?
     std::vector<std::string> clients_seeing(uint64_t netguid) const;
 
+    /// Snapshot all registered clients, including when no actors remain.
+    std::vector<std::string> client_keys() const;
+
     /// Query: is this actor visible to this client?
     bool is_visible(const std::string& client_key, uint64_t netguid) const;
 

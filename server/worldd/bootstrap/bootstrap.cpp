@@ -1574,9 +1574,10 @@ repl::ElementState effect_item_state(const std::array<uint32_t, 4>& character_gu
     v[4] = Value::f32(e.duration);
     v[5] = Value::f32(e.tick_time);
     v[6] = Value::i64(e.stacks);
+    const auto instigator = e.instigator_character_guid.value_or(character_guid);
     for (uint16_t i = 0; i < 4; ++i) {
-        v[static_cast<uint16_t>(7 + i)] = Value::i64(static_cast<int32_t>(character_guid[i]));    // InstigatorGuid
-        v[static_cast<uint16_t>(11 + i)] = Value::i64(static_cast<int32_t>(character_guid[i]));   // SourceGuid
+        v[static_cast<uint16_t>(7 + i)] = Value::i64(static_cast<int32_t>(instigator[i]));    // InstigatorGuid
+        v[static_cast<uint16_t>(11 + i)] = Value::i64(static_cast<int32_t>(instigator[i]));   // SourceGuid
     }
     v[15] = Value::boolean(false);
     v[16] = Value::i64(0);

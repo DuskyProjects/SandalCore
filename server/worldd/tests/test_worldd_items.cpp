@@ -585,12 +585,6 @@ static void test_visible_gear() {
 
 // ---- the retail equips ---------------------------------------------------------------------------------------------------------
 
-static const capture_equip::Record* record_of(int64_t record) {
-    for (const auto& r : capture_equip::kRecords)
-        if (r.record == record) return &r;
-    return nullptr;
-}
-
 static FakeCatalog catalog_of_captures() {
     FakeCatalog c;
     for (const auto& r : capture_equip::kRecords) {
@@ -681,7 +675,6 @@ static void test_retail_equips() {
     }
     std::printf("    %zu retail events compared\n", events_checked);
     CHECK(events_checked > 80, "more than eighty retail events compared");
-    (void)record_of;
 }
 
 // ---- the storage RPCs against the captures --------------------------------------------------------------------------------------

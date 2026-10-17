@@ -21,6 +21,8 @@
 #include "stats/stat_program.h"
 
 #include <algorithm>
+#include <atomic>
+#include <barrier>
 #include <bit>
 #include <cmath>
 #include <cstdio>
@@ -33,6 +35,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace aoc::worldd::stats;
@@ -1246,6 +1249,24 @@ int main() {
     if (!load_corpus(STATS_CORPUS_PATH, corpus, err)) {
         std::printf("  [FAIL] corpus %s: %s\n", STATS_CORPUS_PATH, err.c_str());
         return 1;
+    }
+    if (const auto tiny = corpus.bundles.find("tiny"); tiny != corpus.bundles.end()) {
+        // Exercise the checksum table's first use concurrently, before any other parse.
+        std::barrier start(8);
+        std::atomic<int> parsed{0};
+        std::vector<std::thread> workers;
+        for (int i = 0; i < 8; ++i) {
+            workers.emplace_back([&] {
+                start.arrive_and_wait();
+                for (int run = 0; run < 16; ++run) {
+                    StatBundle bundle;
+                    std::string error;
+                    if (parse_bundle(tiny->second, bundle, error)) ++parsed;
+                }
+            });
+        }
+        for (auto& worker : workers) worker.join();
+        CHECK(parsed == 128, "concurrent first-use bundle parsing keeps checksum verification consistent");
     }
     std::map<std::string, StatBundle> bundles;
     test_corpus(corpus, bundles);

@@ -113,6 +113,9 @@ func repoRoot() string {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "abilities" {
+		return runRefreshAbilities(args[1:], stdout, stderr)
+	}
 	if len(args) > 0 && args[0] == "roads" {
 		return runRoads(args[1:], stdout, stderr) // the roads' tiers (mounts milestone, stage 4): reads content.db and mapc's roads_raw.tsv
 	}

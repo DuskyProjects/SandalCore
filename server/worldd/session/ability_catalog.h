@@ -30,8 +30,34 @@ struct EffectDef {
     content::EffectRow                          row;
     std::vector<content::ModRow>                mods;   // the effect's stat mods
     std::vector<std::pair<std::string, int64_t>> hits;   // (phase, hit guid): PreApply, Apply, Tick, Consume, Remove, Expire, End
+    int64_t extension_expr = 0;
+    double extended_maximum = 0;
 };
 // [C Y B x CoA]
+
+struct RecursiveHitDef {
+    int64_t hit_guid = 0, targeting_guid = 0;
+};
+
+struct TargetSortingDef {
+    int64_t filter_expr = 0, score_expr = 0;
+    std::string filter, score;
+};
+
+struct TargetingDef {
+    int64_t guid = 0;
+    std::string name;
+    double radius = 0;
+    std::vector<TargetSortingDef> sorting;
+};
+
+struct ResonantWeaponRule {
+    enum class Trigger { AbilityConsumed, ComboEnd };
+    Trigger trigger = Trigger::ComboEnd;
+    int64_t guid = 0, melody_effect_guid = 0, root_hit_guid = 0;
+    int targets_bitmask = 0;
+    bool damaging_cost = false;
+};
 
 struct HitDef {
     content::HitRow                    row;
@@ -46,6 +72,9 @@ struct HitDef {
     int64_t                            crit_rate_expr = 0, block_rate_expr = 0, miss_rate_expr = 0;   // ab_expr ids that override the stats' chances (0: the default)
     bool                               force_cant_crit = false, force_cant_block = false, force_cant_miss = false;
     bool                               force_roll_crit = false, force_roll_block = false, force_roll_miss = false;
+    std::vector<RecursiveHitDef>        recursive_hits;
+    std::string                        effect_removal_filter;
+    std::string                        remove_effect_tag;
 };
 
 struct AbilityDef {
@@ -82,6 +111,9 @@ public:
     const HitDef*     hit_named(std::string_view name) const;
     /// A lingering zone (ab_zone: its lifetime and tick rate; the hits are the ones the abilities list).
     const content::ZoneRow* zone(int64_t guid) const;
+    const content::ProjectileRow* projectile(int64_t guid) const;
+    const TargetingDef* targeting(int64_t guid) const;
+    const std::vector<ResonantWeaponRule>& resonant_weapon_rules() const { return resonant_weapon_rules_; }
     /// The expression with the ab_expr id; null for 0 (none) and for an id the tables do not have.
     const content::ExprRow* expr(int64_t id) const;
     /// The bundle program of an expression id: -1 when there is none (id 0, or one that does not compile: expr()->error says why).
@@ -101,6 +133,9 @@ private:
     std::map<int64_t, EffectDef>          effects_;
     std::map<int64_t, HitDef>             hits_;
     std::map<int64_t, content::ZoneRow>   zones_;
+    std::map<int64_t, content::ProjectileRow> projectiles_;
+    std::map<int64_t, TargetingDef> targetings_;
+    std::vector<ResonantWeaponRule> resonant_weapon_rules_;
     std::map<int64_t, content::ExprRow>   exprs_;
 };
 

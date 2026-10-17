@@ -256,7 +256,7 @@ void AbilityRuntime::set_mounted(bool mounted, double now) {
 
 void AbilityRuntime::set_moving(bool moving, double now) {
     advance(now);
-    if (mounted_) moving = false;   // a rider's moves are its mount's: nothing it does charges the pawn
+    if (mounted_ || dead_) moving = false;   // neither a rider nor a dead pawn charges Stamina
     moving_ = moving;
     moving_at_ = std::max(now, now_);
     // the Sprint's regeneration stop depends on the player moving: the StaminaRegeneration item follows
@@ -291,6 +291,7 @@ void AbilityRuntime::set_in_combat(bool in_combat, double now) {
 }
 
 bool AbilityRuntime::regeneration_blocked(double now) const {
+    if (dead_) return true;
     if (sprint_) {
         const EffectRule* e = rules_.effect(rules_.sprint.effect_guid);
         if (e && (moving(now) ? e->stops_regen_moving : e->stops_regen_standing)) return true;
@@ -359,6 +360,10 @@ Refusal AbilityRuntime::trigger(int64_t ability_guid, int32_t client_instance_id
     }
     // An instance that is running is not started twice, and not ended either: ClientEndAbility(id) would end the real one.
     if (instance_of(client_instance_id)) return Refusal::Duplicate;
+    if (dead_) {
+        refuse(client_instance_id, Refusal::Dead, now_, r->name.c_str());
+        return Refusal::Dead;
+    }
     if (mounted_) {
         refuse(client_instance_id, Refusal::Mounted, now_, r->name.c_str());
         return Refusal::Mounted;
@@ -527,10 +532,54 @@ void AbilityRuntime::end_evasion(double t) {
 
 void AbilityRuntime::end_dodge_items(double t) {
     AbilityChange c;
-    c.abilities_removed.push_back(dodge_->instance);
+    if (!dodge_->item_removed) c.abilities_removed.push_back(dodge_->instance);
     if (rules_.dodge.triggers_cooldown && rules_.dodge.cooldown > 0) c.cooldowns_removed.push_back(rules_.dodge.guid);
     dodge_.reset();
     emit({std::move(c), std::nullopt, t, "the Dodge ends: its cooldown is over"});
+}
+
+void AbilityRuntime::set_dead(bool dead, double now) {
+    if (!ok()) return;
+    advance(now);
+    if (dead_ == dead) return;
+    dead_ = dead;
+    if (!dead) {
+        AbilityChange c;
+        sync_regen(c, now_);
+        emit({std::move(c), std::nullopt, now_, "Stamina regeneration resumes after death"});
+        return;
+    }
+    moving_ = false;
+    if (sprint_) end_sprint(now_, Tell::Now, "death ends the Sprint", /*exertion=*/false);
+    if (rest_) {
+        const int32_t client_id = rest_->client_id;
+        const int64_t instance = rest_->instance;
+        if (rest_->effect_key) remove_rest_effect(now_);
+        rest_.reset();
+        AbilityChange c;
+        c.abilities_removed.push_back(instance);
+        emit({std::move(c), client_id, now_, "death ends the Rest"});
+    }
+    AbilityChange c;
+    if (evasion_) {
+        c.effects_removed.push_back(evasion_->effect_key);
+        evasion_.reset();
+    }
+    if (pause_effect_) {
+        c.effects_removed.push_back(pause_effect_->effect_key);
+        pause_effect_.reset();
+    }
+    pause_until_ = -1;
+    dash_until_ = -1;
+    pending_ends_.clear();
+    sync_regen(c, now_);
+    AbilityEvent event{std::move(c), std::nullopt, now_, "death ends transient movement effects"};
+    if (dodge_ && !dodge_->item_removed) {
+        event.change.abilities_removed.push_back(dodge_->instance);
+        event.end_ability = dodge_->client_id;
+        dodge_->item_removed = true;
+    }
+    emit(std::move(event));
 }
 
 // ---- Rest -----------------------------------------------------------------------------------------------------------

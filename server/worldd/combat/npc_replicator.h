@@ -18,6 +18,7 @@
 #pragma once
 
 #include "protocol/repl/replicator.h"
+#include "bootstrap/ability_replication.h"
 #include "stats/character_stats.h"
 #include "world/actor_registry.h"
 
@@ -44,5 +45,10 @@ bool write_elite_rank(world::ActorRegistry& registry, uint64_t actor_id, int ran
 
 /// The EveryoneProxy item's value for a stat of an actor opened from a template (what the client is told now); false when there is none.
 bool read_stat(const world::WorldActor& actor, int64_t record, float& value);
+
+/// Adds or changes an NPC's CurrentEffects item, retaining the FastArray id when refreshed.
+std::optional<int32_t> write_effect(world::ActorRegistry& registry, uint64_t actor_id, std::optional<int32_t> array_id,
+                                   const std::array<uint32_t, 4>& instigator, const bootstrap::EffectItem& item);
+bool erase_effect(world::ActorRegistry& registry, uint64_t actor_id, int32_t array_id);
 
 }  // namespace aoc::worldd::combat

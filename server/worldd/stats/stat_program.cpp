@@ -9,6 +9,7 @@
 #include "stats/stat_program.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 
@@ -21,16 +22,15 @@ constexpr uint16_t kFlagSingle = 1;
 constexpr uint16_t kFlagDouble = 2;
 
 uint32_t crc32_ieee(const uint8_t* p, size_t n) {
-    static uint32_t table[256];
-    static bool init = false;
-    if (!init) {
+    static const auto table = [] {
+        std::array<uint32_t, 256> values{};
         for (uint32_t i = 0; i < 256; ++i) {
             uint32_t c = i;
             for (int k = 0; k < 8; ++k) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-            table[i] = c;
+            values[i] = c;
         }
-        init = true;
-    }
+        return values;
+    }();
     uint32_t c = 0xFFFFFFFFu;
     for (size_t i = 0; i < n; ++i) c = table[(c ^ p[i]) & 0xFF] ^ (c >> 8);
     return c ^ 0xFFFFFFFFu;

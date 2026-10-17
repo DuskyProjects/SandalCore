@@ -194,6 +194,7 @@ type abBuilder struct {
 
 	abilities, effects, hits, mods, projectiles, zones map[int64]*designdb.Row
 	targetingNames                                     map[int64]string
+	reactions, targetingRecords                        map[int64]*designdb.Row
 }
 
 func indexRows(rows []designdb.Row) map[int64]*designdb.Row {
@@ -291,13 +292,15 @@ func buildAbilities(w *writer, src *source, opt *Options, meta map[string]string
 	}
 	b := &abBuilder{
 		w: w, src: src, statNames: statNames,
-		exprs:       &exprSet{w: w, ids: map[string]int64{}, named: namedRecords(src)},
-		abilities:   indexRows(src.rows["AoCAbilityRecordBase"]),
-		effects:     indexRows(src.rows["EffectRecordBase"]),
-		hits:        indexRows(src.rows["AbilityHitRecordBase"]),
-		mods:        indexRows(src.rows["StatModRecordBase"]),
-		projectiles: indexRows(src.rows["ProjectileRecordBase"]),
-		zones:       indexRows(src.rows["LingeringEffectRecordBase"]),
+		exprs:            &exprSet{w: w, ids: map[string]int64{}, named: namedRecords(src)},
+		abilities:        indexRows(src.rows["AoCAbilityRecordBase"]),
+		effects:          indexRows(src.rows["EffectRecordBase"]),
+		hits:             indexRows(src.rows["AbilityHitRecordBase"]),
+		mods:             indexRows(src.rows["StatModRecordBase"]),
+		projectiles:      indexRows(src.rows["ProjectileRecordBase"]),
+		zones:            indexRows(src.rows["LingeringEffectRecordBase"]),
+		reactions:        indexRows(src.rows["ReactionRecordBase"]),
+		targetingRecords: indexRows(src.rows["AbilityTargetingRecordBase"]),
 	}
 
 	// ---- the ranks of every skill tree (plan D1's skill_rank: the one table of ranks); the abilities and effects they grant seed the closure ----
@@ -459,6 +462,33 @@ func buildAbilities(w *writer, src *source, opt *Options, meta map[string]string
 			g := effQ[0]
 			effQ = effQ[1:]
 			ef := newFields(fmt.Sprintf("Effect %s (%d)", b.effects[g].Name, g), b.effects[g].Fields)
+			if b.effects[g].Name == "Bard_ResonantWeapon" {
+				rules, err := b.resonantWeaponRules(b.effects[g])
+				if err != nil {
+					return err
+				}
+				for _, rule := range rules {
+					if err := addHit(rule.HitGuid); err != nil {
+						return err
+					}
+				}
+			} else if b.effects[g].Name == "Status_Shocked" {
+				for _, reaction := range refGuids(ef, "ReactionsIds") {
+					row := b.reactions[reaction]
+					if row == nil {
+						return fmt.Errorf("Shocked names missing reaction %d", reaction)
+					}
+					rf := newFields("Reaction "+row.Name, row.Fields)
+					for _, hit := range refGuids(rf, "ReactHitsIds") {
+						if err := addHit(hit); err != nil {
+							return err
+						}
+					}
+					if rf.err != nil {
+						return rf.err
+					}
+				}
+			}
 			for _, p := range effectPhases {
 				for _, h := range refGuids(ef, p.field) {
 					if err := addHit(h); err != nil {
@@ -474,6 +504,11 @@ func buildAbilities(w *writer, src *source, opt *Options, meta map[string]string
 			g := hitQ[0]
 			hitQ = hitQ[1:]
 			hf := newFields(fmt.Sprintf("AbilityHit %s (%d)", b.hits[g].Name, g), b.hits[g].Fields)
+			for _, recursive := range recursiveHitRefs(hf) {
+				if err := addHit(recursive.HitGuid); err != nil {
+					return err
+				}
+			}
 			for i, v := range hf.list("ApplyEffects") {
 				s, ok := v.(designdb.Struct)
 				if !ok {
@@ -878,6 +913,20 @@ func (b *abBuilder) writeHit(r *designdb.Row) error {
 		"TeleportId": teleport, "ResurrectId": resurrect,
 		"LingeringZonesIds": zones, // the zones the hit spawns (also in ab_hit_zone)
 	}
+	if value, ok := f.get("EffectRemovalFilter"); ok {
+		extra["EffectRemovalFilter"] = value
+	}
+	recursive := recursiveHitRefs(f)
+	if len(recursive) > 0 {
+		for i := range recursive {
+			targeting, err := b.targetingMetadata(recursive[i].TargetingGuid)
+			if err != nil {
+				return err
+			}
+			recursive[i].Targeting = targeting
+		}
+		extra["RecursiveHits"] = recursive
+	}
 	// Plan E1, stage 3: what the damage rules read of a hit besides its mods: its event tags (the element, Melee, ComboStep.End ...), the rates that
 	// override the stats' crit, block and miss chances (expressions, 0 for the default), what it forces and the life states it applies to.
 	extra["EventTags"] = f.tags("EventTags")
@@ -1051,7 +1100,38 @@ func (b *abBuilder) writeEffect(r *designdb.Row) error {
 	persDeath, persRelog, dispel, significant := f.boolean("bPersistsThroughDeath"), f.boolean("bPersistsRelog"), f.boolean("bDispellable"), f.boolean("bSignificant")
 	durT, reqT, inPlaceT := f.str("EffectDuration"), f.str("ApplicationRequirements"), f.str("InPlaceStackLimit")
 	cc, _ := f.id("CrowdControlId")
-	extra := map[string][]int64{"ReactionsIds": refGuids(f, "ReactionsIds"), "HitModsIds": refGuids(f, "HitModsIds"), "FragilityDefinitionsIds": refGuids(f, "FragilityDefinitionsIds")}
+	extra := map[string]any{"ReactionsIds": refGuids(f, "ReactionsIds"), "HitModsIds": refGuids(f, "HitModsIds"), "FragilityDefinitionsIds": refGuids(f, "FragilityDefinitionsIds")}
+	if _, ok := f.get("ExtensionAmount"); ok {
+		extension, err := b.exprs.id(f.str("ExtensionAmount"), nil)
+		if err != nil {
+			return err
+		}
+		extra["ExtensionExpr"] = extension
+	}
+	if _, ok := f.get("ExtendedMaximum"); ok {
+		extra["ExtendedMaximum"] = f.number("ExtendedMaximum")
+	}
+	if r.Name == "Bard_ResonantWeapon" {
+		rules, err := b.resonantWeaponRules(r)
+		if err != nil {
+			return err
+		}
+		extra["ResonantWeaponRules"] = rules
+	} else if r.Name == "Status_Shocked" {
+		var hits []int64
+		for _, guid := range refGuids(f, "ReactionsIds") {
+			row := b.reactions[guid]
+			if row == nil {
+				return fmt.Errorf("Shocked names missing reaction %d", guid)
+			}
+			rf := newFields("Reaction "+row.Name, row.Fields)
+			hits = append(hits, refGuids(rf, "ReactHitsIds")...)
+			if rf.err != nil {
+				return rf.err
+			}
+		}
+		extra["ReactionHits"] = hits
+	}
 	if f.err != nil {
 		return f.err
 	}

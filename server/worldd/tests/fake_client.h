@@ -73,6 +73,31 @@ public:
         notify_.commit_and_increment_out_seq();
         return conn::finish_data_packet(w);
     }
+
+    /// Split a request burst across packet-sized batches without advancing
+    /// simulated time. Oversized single bunches remain available to negative tests.
+    std::vector<std::vector<uint8_t>> packets(std::vector<Bunch> bunches) {
+        const auto prefix_bits = [&] {
+            emit::BunchWriter prefix;
+            conn::begin_client_packet(prefix, outer_, notify_.make_header(), cf_);
+            return prefix.bit_pos() + 2;   // sentinel and termination
+        };
+        std::vector<std::vector<uint8_t>> out;
+        std::vector<Bunch> batch;
+        size_t bits = prefix_bits();
+        for (auto& b : bunches) {
+            const size_t added = conn::bunch_bits(b.header, b.payload.bit_pos());
+            if (!batch.empty() && bits + added > conn::kMaxPacketBytes * 8) {
+                out.push_back(packet(std::move(batch)));
+                batch.clear();
+                bits = prefix_bits();
+            }
+            bits += added;
+            batch.push_back(std::move(b));
+        }
+        out.push_back(packet(std::move(batch)));
+        return out;
+    }
 // [Cyb - C.O.A]
 
     /// A reliable channel-0 bunch with the next channel sequence; the first

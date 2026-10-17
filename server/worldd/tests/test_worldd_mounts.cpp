@@ -1312,6 +1312,27 @@ static void test_desummon_early(const spawns::MountBook& book) {
         CHECK(seen.flags >= 0 && seen.gone >= 0 && rig.registry.count(world::ActorKind::Mount) == 0 && seen.item_end >= 0, "it dissolves and goes, and the cast's item ends");
     }
     {
+        // Losing the actor during the summon must also stop the montage already playing on the owner's pawn.
+        for (const bool summon_again : {false, true}) {
+            Rig rig(book);
+            rig.mc->summon(rig.request(*row), 10.0);
+            Seen seen;
+            rig.run(10.0, 10.2, seen);
+            CHECK(rig.mount() && seen.item >= 0 && seen.item_end < 0, "the mount is open while its summon montage is still playing");
+            rig.registry.remove(rig.mc->actor_id());
+            if (summon_again) {
+                CHECK(rig.mc->summon(rig.request(*row), 10.2) == MountController::Outcome::Started,
+                      "a summon immediately after the old actor disappears starts a new cast");
+            }
+            const MountController::Effects fx = rig.mc->advance(10.2);
+            CHECK(fx.ability.abilities_changed.size() == 1 && fx.ability.abilities_changed[0].server_instance_id == 40 &&
+                      fx.ability.abilities_changed[0].montage_path.empty(),
+                  "the lost mount's summon item stops at once, including when another summon arrives before the next tick");
+            CHECK(!summon_again ? (rig.mc->phase() == MountController::Phase::Idle && !rig.mc->busy()) : rig.mc->phase() == MountController::Phase::Summoning,
+                  "the missing actor leaves no pending old cast");
+        }
+    }
+    {
         // the registry loses the mount by itself (another system removes it)
         Rig rig(book);
         rig.mc->summon(rig.request(*row), 10.0);

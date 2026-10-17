@@ -175,6 +175,38 @@ int main() {
         CHECK(mock.spawns[0].client == "clientA", "spawn went to clientA only");
     }
 
+    // A previously delivered destroy must not reappear when another actor
+    // makes the clients discoverable on a later tick.
+    CHECK(mock.destroys.empty(), "a destroyed actor is not destroyed again on later ticks");
+
+    mock.clear();
+    simulation::SimulationActor fleeting;
+    fleeting.netguid = 0x03000000;
+    fleeting.type = schema::ActorType::NPC;
+    actors.spawn(std::move(fleeting));
+    actors.destroy(0x03000000);
+    broadcast.tick();
+    CHECK(mock.spawns.empty() && mock.destroys.empty(),
+          "actor spawned and removed before a tick emits neither spawn nor destroy");
+
+    // A client joining between spawn and removal has no seen_by_client entry.
+    replication::VisibilityManager fresh;
+    fresh.add_client("fresh");
+    fresh.add_actor(42);
+    fresh.remove_actor(42);
+    auto fresh_diff = fresh.drain_diff_for_client("fresh");
+    CHECK(fresh_diff.newly_visible.empty() && fresh_diff.newly_hidden.empty(),
+          "removal cancels an undelivered spawn for a client which never drained a diff");
+
+    mock.clear();
+    actors.destroy(0x02000000);
+    broadcast.tick();
+    CHECK(mock.destroys.size() == 1 && mock.destroys[0].netguid == 0x02000000,
+          "last actor's destroy reaches its viewer even when the actor snapshot is empty");
+    mock.clear();
+    broadcast.tick();
+    CHECK(mock.destroys.empty(), "idle tick after the last destroy emits nothing");
+
     std::printf("\n=== Summary ===\n");
     std::printf("  Passed: %d\n", g_pass);
     std::printf("  Failed: %d\n", g_fail);

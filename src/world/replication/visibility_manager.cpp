@@ -5,6 +5,7 @@
 //  world/replication/visibility_manager.cpp
 // ============================================================================
 #include "world/replication/visibility_manager.h"
+#include <algorithm>
 
 namespace aoc { namespace world { namespace replication {
 
@@ -38,7 +39,8 @@ void VisibilityManager::add_actor(uint64_t netguid) {
 void VisibilityManager::remove_actor(uint64_t netguid) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!known_actors_.erase(netguid)) return;
-    for (auto& [client, seen] : seen_by_client_) {
+    for (const auto& client : known_clients_) {
+        auto& seen = seen_by_client_[client];
         if (seen.erase(netguid)) {
             // Client had previously been notified; tell it to destroy.
             pending_diffs_[client].newly_hidden.push_back(netguid);
@@ -75,6 +77,11 @@ std::vector<std::string> VisibilityManager::clients_seeing(uint64_t netguid) con
 bool VisibilityManager::is_visible(const std::string& client_key, uint64_t netguid) const {
     std::lock_guard<std::mutex> lk(mu_);
     return known_clients_.count(client_key) && known_actors_.count(netguid);
+}
+
+std::vector<std::string> VisibilityManager::client_keys() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return {known_clients_.begin(), known_clients_.end()};
 }
 
 VisibilityManager::VisibilityDiff

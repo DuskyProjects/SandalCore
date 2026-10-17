@@ -104,7 +104,10 @@ What the gateway answers the game client:
   - 22: anything else, a mesh that is not listening included.
 - Creating a character answers 24 when its data is over 64 KiB or its name over 64 bytes, or when the
   character service refuses its race, gender, class or customization ("Character creation" below), 47
-  when the name is taken, and 48 beyond 16 characters per session. With no usable `content.db` the
+  when the name is taken, and 48 beyond 16 characters per account. The character service checks this limit
+  inside the creation transaction, so simultaneous sessions cannot exceed it. Offline `charimport` preserves
+  existing characters without applying this runtime cap. The production gateway uses the shared limit of 16;
+  `ics.Config.MaxCharacters` is an internal per-stream guard, not a configurable account limit. With no usable `content.db` the
   character service refuses every creation, and the client gets an internal error, 22 (the reason is in
   the gateway's and the character service's logs). A refused create is a `CreateCharacterReply` with an
   empty body that echoes the request's tracking tag.
@@ -829,6 +832,21 @@ $env:AOC_USMAP = 'layouts\aoc.usmap'
 $env:AOC_CLIENT_CONFIG = 'dist\content\client_config'      # written by `mapc export-config`
 cd services; go run ./cmd/contentc
 ```
+
+Contentc version 13 includes Resonant Weapon reactions, recursive hits and their
+targeting, projectile and effect closure. An existing content database retains
+the original decoded records, so its ability tables and stat program can be
+refreshed without the original `.dbc` or mappings file:
+
+```powershell
+cd services
+go run ./cmd/contentc abilities --content ../dist/content/content.db --out ../dist/content/content-v13.db
+```
+
+The output must be a new file. The command preserves the input and all unrelated
+typed tables, and compiles formulas from the recorded data. Set `AOC_CONTENT_DB`
+to the new file before starting the services and world server. Older databases
+remain readable but do not contain these reaction definitions.
 
 ### The mappings file
 

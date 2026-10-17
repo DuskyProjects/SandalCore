@@ -81,6 +81,7 @@ struct Resolved {
     uint8_t                  flags = 0;     // stats::kHitMiss | kHitBlock | kHitCrit (Lethal is the applier's)
     std::vector<ResolvedMod> mods;
     double                   threat = 0;    // what a damaging hit adds to the target's threat table
+    int64_t                  hit_guid = 0, source_type = 0, source_guid = 0;
     bool miss() const { return (flags & stats::kHitMiss) != 0; }
 };
 

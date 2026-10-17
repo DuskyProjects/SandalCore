@@ -252,6 +252,7 @@ struct Harness {
     Clock::time_point t = t0;
     std::vector<fake::Delivered> got;
     size_t packets = 0, bytes = 0;
+    size_t client_packets = 0, largest_client_packet = 0;
     std::string error;
     uint32_t pawn_ch = 0, pc_ch = 0;
     double tick_us_total = 0, tick_us_max = 0;
@@ -282,11 +283,14 @@ struct Harness {
         }
     }
     void client_sends(std::vector<fake::Bunch> bunches) {
-        const auto pkt = client.packet(std::move(bunches));
-        const std::vector<InBunch> in = conn.receive(pkt, t);
-        s->take_acks(conn);
-        for (const InBunch& b : in) s->on_bunch(conn, b, t);
-        s->end_of_datagram(conn);
+        for (const auto& pkt : client.packets(std::move(bunches))) {
+            ++client_packets;
+            largest_client_packet = std::max(largest_client_packet, pkt.size());
+            const std::vector<InBunch> in = conn.receive(pkt, t);
+            s->take_acks(conn);
+            for (const InBunch& b : in) s->on_bunch(conn, b, t);
+            s->end_of_datagram(conn);
+        }
     }
     void step(milliseconds d = milliseconds(20)) {
         t += d;
@@ -852,10 +856,14 @@ static void test_vendor_spam() {
     h.run(milliseconds(1500));
     h.talk_to(h.gm);
     const size_t refused_before = h.s->vendor_refused();
-    // 200 purchases of one potion in one burst, no time between them: the budget (a burst of eight) cuts it
+    // Forty purchases in one burst, across valid datagrams at the same time:
+    // the budget (a burst of eight) cuts it.
     std::vector<fake::Bunch> burst;
     for (int i = 0; i < 40; ++i) burst.push_back(h.client.actor(h.pc_ch, purchase(cart_of(h.gear_def, {{fi::kRingA, 1}})), true));
+    const size_t packets_before = h.client_packets;
     h.client_sends(std::move(burst));
+    CHECK(h.client_packets > packets_before + 1 && h.largest_client_packet <= conn::kMaxPacketBytes,
+          "a purchase burst uses multiple datagrams within the protocol's size limit");
     h.settle();
     const size_t applied = h.s->vendor_purchases();
     CHECK(applied <= 8 + 2 && applied >= 1, "a burst of 40 purchases buys at most what the budget allows (eight and the tokens earned meanwhile)");

@@ -3965,10 +3965,133 @@ static void test_e1_death_without_loss() {
     CHECK(held_of(*r.h.s, kCopper) == 20 && r.h.s->pile_actor() == 0, "the copper is all there and no pile stands");
 }
 
-int main() {
+static void test_lethal_inbox_hit_precedes_ordinary_heal() {
+    std::printf("a queued ordinary heal cannot undo a preceding lethal hit\n");
+    const svc::Character rec = bard25();
+    std::vector<uint64_t> wolves;
+    uint64_t far_wolf = 0, next_actor_id = 6500000;
+    bool ground = false;
+    const auto prepare = [&](PlayerWorld& world) { spawn_wolves(world, wolves, far_wolf, 1, 24, 1, ground, next_actor_id); };
+    Run r(0, true, &rec, prepare);
+    CHECK(ground && wolves.size() == 1 && r.h.fx.world->combat(), "(the session has synthetic ground and a combat inbox)");
+    if (!ground || wolves.size() != 1 || !r.h.fx.world->combat()) return;
+    r.play(0.5, false);
+    combat::PlayerPort* port = r.h.fx.world->combat()->find_player(r.h.s->bootstrap().setup().guids.pawn.ObjectId);
+    const abilities::Catalog* catalog = r.h.fx.world->ability_catalog();
+    const abilities::HitDef* cheerful = catalog ? catalog->hit_named("Bard_ResonantWeapon_End_Cheerful_Projectile") : nullptr;
+    CHECK(port && cheerful, "(the player port and real Cheerful proc hit are available)");
+    if (!port || !cheerful) return;
+
+    combat::IncomingHit lethal;
+    lethal.instigator = wolves.front();
+    lethal.hit_guid = 1;
+    lethal.mods.push_back({1, content::kGuidHealth, -1.0e9});
+    lethal.at = r.now();
+    combat::IncomingHit heal;
+    heal.instigator = port->actor_id();
+    heal.hit_guid = cheerful->row.guid;
+    heal.source_type = content::kSourceTypeProjectile;
+    heal.mods.push_back({2, content::kGuidHealth, 1.0e9});
+    heal.at = r.now();
+    CHECK(port->queue_hit(lethal, r.now()), "the lethal hit is accepted while the recipient lives");
+    port->confirm_hit_on(lethal, wolves.front(), 1, false, r.now());
+    CHECK(port->queue_hit(heal, r.now()) && port->receive_effect(kGleeEffect, 1, std::nullopt, port->actor_id(), r.now()),
+          "the later Cheerful heal and Glee are accepted before the inbox is drained");
+    CHECK(!r.h.s->dead() && r.rt().stat(kHealthStat) > 0, "the accepted receipts have not changed the player's state yet");
+    r.h.step(milliseconds(20));
+    r.absorb();
+    CHECK(r.h.s->dead() && r.h.s->deaths() == 1 && r.h.s->respawns() == 0,
+          "the lethal hit enters death before the later ordinary heal is processed");
+    const stats::StatValue* health = r.h.s->character_stats()->find(kHealthStat);
+    CHECKF(health && health->value == 0 && r.m.stats[kHealthStat] == 0 && r.rt().stat(kStaminaRegeneration) == 0,
+           "the character and client retain zero Health and blocked regeneration (Health %.3f, client %.3f, regeneration %.3f)",
+           health ? static_cast<double>(health->value) : -1.0, static_cast<double>(r.m.stats[kHealthStat]), r.rt().stat(kStaminaRegeneration));
+    CHECK(r.h.s->pipeline()->stacks_of(kGleeEffect) == 0 && !r.m.has_effect(kGleeEffect),
+          "the queued Glee does not apply after the lethal hit");
+    bool outgoing_confirmed = false;
+    for (const repl::HitInstance& hit : r.m.hits) {
+        if (hit.record_guid != lethal.hit_guid) continue;
+        for (const repl::HitTarget& target : hit.targets) outgoing_confirmed = outgoing_confirmed || target.hit_comp.ObjectId == wolves.front();
+    }
+    CHECK(outgoing_confirmed, "entering death preserves the queued outgoing hit confirmation");
+    CHECK(!port->queue_hit(heal, r.now()) && !port->receive_effect(kGleeEffect, 1, std::nullopt, port->actor_id(), r.now()),
+          "the dead player's inbox refuses further ordinary heals and buffs");
+    CHECK(!r.h.s->abilities_failed() && r.m.unreadable == 0, "the death boundary preserves valid client updates");
+}
+
+static void test_death_respawn_drains_ability_events_in_order() {
+    std::printf("death and immediate respawn preserve cross-runtime stat event order\n");
+    const svc::Character rec = bard25();
+    std::vector<uint64_t> wolves;
+    uint64_t far_wolf = 0, next_actor_id = 6000000;
+    bool ground = false;
+    const auto prepare = [&](PlayerWorld& world) { spawn_wolves(world, wolves, far_wolf, 1, 24, 1, ground, next_actor_id); };
+    Run r(0, true, &rec, prepare);
+    CHECK(ground && wolves.size() == 1 && r.h.fx.world->combat(), "(the session has synthetic ground and a combat inbox)");
+    if (!ground || wolves.size() != 1 || !r.h.fx.world->combat()) return;
+    r.play(0.5, false);
+    const abilities::Catalog* catalog = r.h.fx.world->ability_catalog();
+    const abilities::AbilityDef* epic = catalog ? catalog->ability_named("Bard_Music_Epic") : nullptr;
+    const abilities::EffectDef* self = catalog ? catalog->effect_named("Bard_Music_Epic_Self") : nullptr;
+    const abilities::EffectDef* buff = catalog ? catalog->effect_named("Bard_Music_Epic_Buff") : nullptr;
+    CHECK(epic && self && buff && !buff->row.persists_through_death, "(Epic has a transient Stamina regeneration buff)");
+    if (!epic || !self || !buff) return;
+    const double baseline_regeneration = r.rt().stat(kStaminaRegeneration);
+    r.h.s->teach_ability(epic->row.guid);
+    trigger_aimed_now(r, epic->row.guid, false);
+    r.play(3.0, false);
+    CHECK(r.m.has_effect(self->row.guid) && r.m.has_effect(buff->row.guid) &&
+              r.rt().stat(kStaminaRegeneration) > baseline_regeneration &&
+              near(r.m.stats[kStaminaRegeneration], r.rt().stat(kStaminaRegeneration), 1e-5),
+          "Epic is active and its increased regeneration agrees on the client and runtime");
+    combat::PlayerPort* port = r.h.fx.world->combat()->find_player(r.h.s->bootstrap().setup().guids.pawn.ObjectId);
+    CHECK(port != nullptr, "(the combat world knows the session's player)");
+    if (!port) return;
+    combat::IncomingHit lethal;
+    lethal.instigator = wolves.front();
+    lethal.hit_guid = 1;
+    lethal.mods.push_back({1, content::kGuidHealth, -1.0e9});
+    lethal.at = r.now();
+    port->receive_hit(lethal, r.now());
+    r.h.step(milliseconds(20));   // exactly one ability tick: consumes the hit and enters death
+    r.absorb();
+    CHECK(r.h.s->dead() && r.h.s->deaths() == 1 && r.rt().stat(kStaminaRegeneration) == 0,
+          "the lethal inbox hit kills the character and blocks runtime regeneration");
+    CHECK(!r.m.has_effect(self->row.guid) && !r.m.has_effect(buff->row.guid) && r.m.stats[kStaminaRegeneration] == 0,
+          "the same death tick removes Epic and sends zero regeneration to the client");
+
+    const Clock::time_point death_tick = r.h.t;
+    send_on_pawn(r, respawn_choice_bunch(PlayerSession::kRespawnRecord));   // no intervening tick drains queued events
+    CHECK(r.h.t == death_tick && !r.h.s->dead() && r.h.s->respawns() == 1,
+          "the accepted respawn arrives before another ability tick");
+    CHECK(r.rt().stat(kStaminaRegeneration) > 0 &&
+              near(r.m.stats[kStaminaRegeneration], r.rt().stat(kStaminaRegeneration), 1e-5),
+          "respawn restores regeneration in the runtime and client before any later tick");
+    r.h.step(milliseconds(20));
+    r.absorb();
+    CHECK(near(r.m.stats[kStaminaRegeneration], r.rt().stat(kStaminaRegeneration), 1e-5),
+          "the first tick after respawn cannot replay a stale death regeneration value");
+    r.play(3.0, false);
+    CHECK(!r.m.has_effect(self->row.guid) && !r.m.has_effect(buff->row.guid) &&
+              r.h.s->pipeline()->stacks_of(self->row.guid) == 0 && r.h.s->pipeline()->stacks_of(buff->row.guid) == 0 &&
+              !r.h.s->abilities_failed() && r.m.unreadable == 0,
+          "the old song never returns and every cleanup update remains valid");
+}
+
+int main(int argc, char** argv) {
     auto logger = std::make_shared<spdlog::logger>("test", std::make_shared<spdlog::sinks::ostream_sink_mt>(g_log));
     logger->set_level(spdlog::level::debug);
     spdlog::set_default_logger(logger);
+
+    if (argc == 2 && std::string(argv[1]) == "--death-event-order") {
+        CHECK(ability_rig::real_db_present(), "the compiled content database is present");
+        if (ability_rig::real_db_present()) {
+            test_death_respawn_drains_ability_events_in_order();
+            test_lethal_inbox_hit_precedes_ordinary_heal();
+        }
+        std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
+        return g_fail == 0 ? 0 : 1;
+    }
 
     test_sprint();
     test_sprint_cancel();
@@ -4019,6 +4142,8 @@ int main() {
         test_e1_loot_with_full_bag();
         test_e1_player_death();
         test_e1_death_without_loss();
+        test_death_respawn_drains_ability_events_in_order();
+        test_lethal_inbox_hit_precedes_ordinary_heal();
     } else {
         std::printf("no content.db at %s: the plan D2 session tests are skipped\n", ability_rig::real_db_path().c_str());
     }

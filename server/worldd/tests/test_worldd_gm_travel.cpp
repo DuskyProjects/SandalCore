@@ -139,8 +139,8 @@ static std::vector<svc::InventoryItem> kit() {
     out.push_back(make_item(Bag, kSwordSlot, fi::kSword2H, 200));
     out.push_back(make_item(Bag, kPotionSlot, fi::kPotion, 201, 5));
     svc::InventoryItem a = make_item(Bag, kMountSlot, g_mount_record, 300);
-    a.persisted_health = 3572;
-    a.persisted_mana = 1;
+    a.persisted_health = 3572.0f;
+    a.persisted_mana = 1.0f;
     out.push_back(a);
     out.push_back(make_item(Bag, kOtherMountSlot, g_other_mount_record, 301));
     svc::InventoryItem locked = make_item(Bag, kLockedSlot, g_mount_record, 302);

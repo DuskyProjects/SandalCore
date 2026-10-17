@@ -32,6 +32,7 @@
 #include <limits>
 #include <map>
 #include <random>
+#include <variant>
 
 namespace aoc { namespace worldd {
 
@@ -144,13 +145,55 @@ bool PlayerSession::allocate_channels(const Connection& conn) {
 /// queued here and applied by the session's own tick, which has the connection).
 class PlayerSession::CombatSide final : public combat::PlayerPort, public combat::Fighter {
 public:
+    struct EffectReceipt {
+        int64_t effect = 0;
+        int stacks = 0;
+        std::optional<double> duration;
+        std::shared_ptr<const combat::EffectSource> source;
+    };
+    struct HitReceipt {
+        combat::IncomingHit hit;
+        uint64_t target = 0;
+        double taken = 0;
+        bool lethal = false;
+    };
+    struct EffectRemovalReceipt {
+        std::string tag;
+        int limit = 0;
+    };
+    using Incoming = std::variant<combat::IncomingHit, EffectReceipt, EffectRemovalReceipt, HitReceipt>;
     explicit CombatSide(PlayerSession& s) : s_(s), aligns_(combat::CombatData::player_alignments()) {}
 
     // PlayerPort
     uint64_t actor_id() const override { return s_.pb_.setup().guids.pawn.ObjectId; }
+    FIntrepidNetworkGUID actor_guid() const override { return s_.pb_.setup().guids.pawn; }
+    FIntrepidNetworkGUID hit_component_guid() const override { return s_.pb_.setup().guids.collision_cylinder; }
     combat::Fighter& fighter() override { return *this; }
-    void receive_hit(const combat::IncomingHit& hit, double) override {
-        if (inbox.size() < 256) inbox.push_back(hit);
+    bool queue_hit(const combat::IncomingHit& hit, double) override {
+        if (!alive() || inbox.size() >= 256) return false;
+        inbox.push_back(hit);
+        return true;
+    }
+    void receive_hit(const combat::IncomingHit& hit, double now) override {
+        (void)queue_hit(hit, now);
+    }
+    bool receive_effect(int64_t effect, int stacks, std::optional<double> duration, uint64_t instigator, double now) override {
+        return receive_effect_from(effect, stacks, duration, instigator, nullptr, now);
+    }
+    bool receive_effect_from(int64_t effect, int stacks, std::optional<double> duration, uint64_t,
+                             std::shared_ptr<const combat::EffectSource> source, double) override {
+        const abilities::Catalog* catalog = s_.world_ ? s_.world_->ability_catalog() : nullptr;
+        if (!alive() || !s_.pipeline_ || !catalog || !catalog->effect(effect) || stacks <= 0 || inbox.size() >= 256) return false;
+        inbox.emplace_back(EffectReceipt{effect, stacks, duration, std::move(source)});
+        return true;
+    }
+    bool receive_effect_removal(const std::string& tag, int limit, double) override {
+        if (!alive() || !s_.pipeline_ || tag.empty() || limit <= 0 || inbox.size() >= 256) return false;
+        inbox.emplace_back(EffectRemovalReceipt{tag, limit});
+        return true;
+    }
+    void confirm_hit_on(const combat::IncomingHit& hit, uint64_t target, double taken, bool lethal, double) override {
+        if (inbox.size() < 256) inbox.emplace_back(HitReceipt{hit, target, taken, lethal});
     }
     void set_in_combat(bool in_combat, double) override { wants_in_combat = in_combat; }
     std::array<uint32_t, 4> character_guid() const override { return s_.pb_.setup().character_guid; }
@@ -175,7 +218,7 @@ public:
     stats::CharacterStats& stats() override { return *s_.stats_; }
     std::vector<stats::WornItem> worn() const override { return bootstrap::worn_items_of(s_.inventory_); }
 
-    std::vector<combat::IncomingHit> inbox;
+    std::vector<Incoming>             inbox;   // preserve delivery order across hits, buffs and outgoing confirmations
     std::vector<combat::KillReward>  kills;
     bool                             wants_in_combat = false;
 
@@ -225,8 +268,11 @@ std::vector<uint64_t> PlayerSession::actors_of(const std::vector<protocol::emit:
 
 void PlayerSession::take_hit(Connection& conn, const combat::IncomingHit& h, Clock::time_point now) {
     if (!pipeline_) return;
-    // the mounts milestone, stage 3: a hit aimed at a mounted rider lands on the MOUNT's Health; the rider's own is untouched
-    if (mounted()) return hit_on_mount(conn, h, now);
+    // Damage aimed at a mounted rider lands on the mount; beneficial hits restore the rider's own resources.
+    const bool damages_health = std::any_of(h.mods.begin(), h.mods.end(), [](const combat::ResolvedMod& mod) {
+        return mod.stat_guid == content::kGuidHealth && std::isfinite(mod.value) && mod.value < 0;
+    });
+    if (mounted() && damages_health) return hit_on_mount(conn, h, now);
     pipeline_->receive_hit(h, ability_seconds(now));
     if (mounts_ && (h.flags & stats::kHitMiss) == 0) {
         for (const combat::ResolvedMod& m : h.mods) {
@@ -241,9 +287,24 @@ void PlayerSession::take_hit(Connection& conn, const combat::IncomingHit& h, Clo
 void PlayerSession::drain_combat(Connection& conn, Clock::time_point now) {
     if (!combat_side_ || !pipeline_) return;
     const double sec = ability_seconds(now);
-    std::vector<combat::IncomingHit> hits;
-    hits.swap(combat_side_->inbox);
-    for (const combat::IncomingHit& h : hits) take_hit(conn, h, now);
+    std::vector<CombatSide::Incoming> incoming;
+    incoming.swap(combat_side_->inbox);
+    for (const CombatSide::Incoming& entry : incoming) {
+        if (const auto* hit = std::get_if<combat::IncomingHit>(&entry)) {
+            take_hit(conn, *hit, now);
+            // A later queued heal must not undo a lethal hit before the session enters death.
+            take_ability_events();
+            check_death(conn, now);
+        } else if (const auto* effect = std::get_if<CombatSide::EffectReceipt>(&entry)) {
+            if (combat_side_->alive()) pipeline_->grant_effect_from(effect->effect, effect->stacks, sec, effect->duration, effect->source);
+        } else if (const auto* removal = std::get_if<CombatSide::EffectRemovalReceipt>(&entry)) {
+            if (combat_side_->alive()) pipeline_->remove_effects_by_tag(removal->tag, removal->limit, sec);
+        } else if (const auto* receipt = std::get_if<CombatSide::HitReceipt>(&entry); receipt && hit_port_) {
+            const FIntrepidNetworkGUID target = hit_port_->guid_of(receipt->target);
+            const FIntrepidNetworkGUID cylinder = hit_port_->hit_component_of(receipt->target);
+            if (target.is_valid()) pipeline_->confirm_hit_on(receipt->hit, sec, target, cylinder, receipt->taken, receipt->lethal);
+        }
+    }
     // the experience of the kills (a level-up sends a dozen chains: it waits for room)
     while (!combat_side_->kills.empty()) {
         if (!room_for(12 + (world_ ? world_->auto_grants().size() : 0))) break;
@@ -413,6 +474,10 @@ std::unique_ptr<PlayerSession> PlayerSession::join(Connection& conn, PlayerWorld
         return nullptr;
     }
     for (bootstrap::Send& s : *sequence) p->join_.push_back(std::move(s));
+    if (!p->sync_persistent_rank_effects(0)) {
+        error = "the bootstrap does not take the character's persistent talent effects";
+        return nullptr;
+    }
 // [C | O | A x C Y B]
 
     const bootstrap::PlayerSetup& setup = p->pb_.setup();
@@ -760,8 +825,7 @@ void PlayerSession::finish(const char* why) {
     if (progress_changed_) hand_over_progress(why);
 }
 
-void PlayerSession::hand_over_progress(const char* why) {
-    if (!sink_) return;
+svc::Progress PlayerSession::progress_snapshot() const {
     svc::Progress p;
     p.level = progress_.level;
     p.class_id = class_id_;
@@ -790,7 +854,12 @@ void PlayerSession::hand_over_progress(const char* why) {
             p.action_bar.push_back(std::move(a));
         }
     }
-    sink_->save_progress(character_id_, std::move(p));
+    return p;
+}
+
+void PlayerSession::hand_over_progress(const char* why) {
+    if (!sink_) return;
+    sink_->save_progress(character_id_, progress_snapshot());
     ++progress_handed_over_;
     spdlog::info("[session] {}: saving the progress (level {}, class {}, Adventuring {} XP, debt {}) ({})", name(), progress_.level, class_id_, progress_.xp,
                  progress_.debt, why);
@@ -2370,6 +2439,7 @@ void PlayerSession::refresh_rank_mods() {
 
 void PlayerSession::apply_gear_stats(const char* what) {
     if (!stats_ || !stats_->started()) return;
+    sync_persistent_rank_effects(pipeline_ ? pipeline_->now() : 0);
     refresh_rank_mods();   // plan D1, stage 2: the ranks the character has (and the weapon line in hand) are an input like the gear
     // plan D2: a class change takes the old class's effects off and resolves the new class's resource rule (its own stat changes go out with it)
     if (pipeline_ && pipeline_->resource_class() != stats_->class_enum()) pipeline_->refresh(pipeline_->now(), "the class changed", false);
@@ -3150,7 +3220,10 @@ void PlayerSession::die(Connection& conn, Clock::time_point now) {
     dead_ = true;
     ++deaths_;
     cancel_gather(&conn, "the player died", Interrupt::Death);   // Gathering stage 2
-    if (pipeline_) pipeline_->set_dead(true);
+    if (pipeline_) {
+        pipeline_->set_dead(true);
+        take_ability_events();   // finish death cleanup before a respawn can restore the bridge's stats
+    }
     // the mounts milestone, stage 3: the dead player is dismounted (the death frame below restarts its pawn) and its mount is desummoned
     if (mounted()) dismount(conn, now, DismountWhy::PlayerDied);
     if (mounts_ && abilities_) mounts_->desummon(ability_seconds(now));
@@ -3260,7 +3333,10 @@ void PlayerSession::on_respawn_choice(Connection& conn, const repl::ClientRpc& r
     // alive again: full Health and Mana, the pawn not dead, the character at the spot (the move checker moves with it, the client is snapped)
     dead_ = false;
     ++respawns_;
-    if (pipeline_) pipeline_->set_dead(false);
+    if (pipeline_) {
+        pipeline_->set_dead(false);
+        take_ability_events();
+    }
     pb_.set_dead(false);
     const stats::StatValue* hp = stats_ ? stats_->find(content::kGuidMaxHealth) : nullptr;
     const stats::StatValue* mp = stats_ ? stats_->find(content::kGuidMaxMana) : nullptr;
@@ -3568,18 +3644,64 @@ void PlayerSession::sync_item_abilities(Connection& conn) {
     queue("pawn state", [](bootstrap::PlayerBootstrap& pb) { return pb.pawn_state_update("item abilities"); }, conn);
 }
 
+namespace {
+
+bootstrap::EffectItem rank_effect_item(const talents::Rank& rank, int64_t key, double world_time) {
+    bootstrap::EffectItem effect;
+    effect.effect_id = key;
+    effect.effect_guid = rank.effect;
+    effect.start_time = bootstrap::effect_clock(world_time);
+    effect.duration = rank.effect_infinite ? std::numeric_limits<float>::max() : static_cast<float>(rank.effect_duration);
+    effect.tick_time = 0;
+    effect.stacks = 1;
+    return effect;
+}
+
+}  // namespace
+
+bool PlayerSession::sync_persistent_rank_effects(double session_time) {
+    if (!book_) return true;
+    std::set<int64_t> active;
+    std::vector<talents::RankRef> persistent;
+    for (const talents::Tree* tree : book_->listed_trees()) {
+        if (tree->kind == talents::Kind::Weapon && tree->weapon_line != wielded_line_) continue;
+        for (const talents::RankRef& ref : book_->listed(*tree)) {
+            active.insert(ref.rank->guid);
+            if (ref.rank->effect != 0 && ref.rank->effect_infinite) persistent.push_back(ref);
+        }
+    }
+    const auto previous_items = rank_effects_;
+    const auto previous_markers = markers_;
+    bootstrap::AbilityChange change;
+    std::vector<int64_t> remove;
+    for (const auto& [rank, key] : rank_effects_) {
+        if (!active.contains(rank)) remove.push_back(rank);
+    }
+    for (const int64_t rank : remove) remove_rank_effect(rank, change);
+    for (const talents::RankRef& ref : persistent) {
+        if (rank_effects_.contains(ref.rank->guid)) continue;
+        const int64_t key = next_passive_effect_id_++;
+        change.effects_added.push_back(rank_effect_item(*ref.rank, key, pb_.setup().world_time + session_time));
+        rank_effects_[ref.rank->guid] = key;
+    }
+    if (change.empty()) return true;
+    if (!pb_.apply_ability_change(change)) {
+        rank_effects_ = previous_items;
+        markers_ = previous_markers;
+        spdlog::warn("[session] {}: persistent talent effect items could not be synchronized ({})", name(),
+                     pb_.error().empty() ? "effect keys disagree" : pb_.error());
+        return false;
+    }
+    abilities_dirty_ = true;
+    return true;
+}
+
 void PlayerSession::add_rank_effect(const talents::RankRef& ref, Clock::time_point now, bootstrap::AbilityChange& effects) {
     const talents::Rank& rank = *ref.rank;
     if (rank.effect == 0 || rank_effects_.count(rank.guid)) return;
     // a weapon rank's passive applies while the weapon of its line is in hand (retail sent no item for a line that was not wielded)
     if (ref.tree->kind == talents::Kind::Weapon && ref.tree->weapon_line != wielded_line_) return;
-    bootstrap::EffectItem e;
-    e.effect_id = next_passive_effect_id_++;
-    e.effect_guid = rank.effect;
-    e.start_time = bootstrap::effect_clock(pb_.setup().world_time + session_seconds(now));
-    e.duration = rank.effect_infinite ? std::numeric_limits<float>::max() : static_cast<float>(rank.effect_duration);
-    e.tick_time = 0;
-    e.stacks = 1;
+    const bootstrap::EffectItem e = rank_effect_item(rank, next_passive_effect_id_++, pb_.setup().world_time + session_seconds(now));
     effects.effects_added.push_back(e);
     rank_effects_[rank.guid] = e.effect_id;
     // a marker effect (0.1 s of a weapon rank, 1 s of a Universal rank) is ended by the server
@@ -3832,6 +3954,9 @@ void PlayerSession::on_set_ranged(Connection& conn, const repl::ClientRpc& rpc, 
     if (!pb_.set_using_ranged_weapon(use_ranged_)) spdlog::warn("[session] {}: the pawn does not take CombatInfo.bIsUsingRangedWeapon", name());
     const auto weapon = bootstrap::worn_weapon(*world_->content(), inventory_, use_ranged_ ? items::equip::Ranged : items::equip::Primary);
     if (!weapon) {
+        wielded_line_ = 0;
+        pb_.set_weapon_skill_line(0, "None");
+        apply_gear_stats("the empty weapon set");
         spdlog::info("[session] {}: the weapon set is the {} one now and nothing is worn in its slot: the combo stays", name(), use_ranged_ ? "ranged" : "melee");
         queue("pawn state", [](bootstrap::PlayerBootstrap& pb) { return pb.pawn_state_update("weapon swap"); }, conn);
         return;

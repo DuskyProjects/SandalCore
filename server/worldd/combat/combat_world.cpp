@@ -8,6 +8,7 @@
 
 #include "combat/npc_kits.h"
 #include "combat/npc_replicator.h"
+#include "bootstrap/constants.h"
 #include "content/content_db.h"
 #include "spawns/generic_npc.h"
 
@@ -15,12 +16,23 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <limits>
 
 namespace aoc::worldd::combat {
 
 namespace {
 
 nav::Vec3 to_nav(const Vec3& v) { return nav::Vec3{v.x, v.y, v.z}; }
+
+class EffectHost final : public ContextHost {
+public:
+    explicit EffectHost(std::function<double(int, const std::string&)> query) : query_(std::move(query)) {}
+protected:
+    double other_fn(int fn, const std::string& name, const double*, int) override { return query_(fn, name); }
+private:
+    std::function<double(int, const std::string&)> query_;
+};
 
 /// The kit of a creature kind: by the Blueprint's leaf without "_C"; else the kit whose name is the longest prefix of the leaf (or the leaf of it).
 const npc_kits::Kit* kit_of(const std::string& leaf_in) {
@@ -95,6 +107,17 @@ public:
         double until = 0;   // 0: until used up
     };
     std::vector<Shield>                    shields;
+    struct Effect {
+        int64_t key = 0;
+        const abilities::EffectDef* def = nullptr;
+        uint64_t instigator = 0;
+        int stacks = 1;
+        double start = 0, end = 0;
+        std::vector<stats::EffectMod> mods;
+        std::optional<int32_t> array_id;
+    };
+    std::vector<Effect> effects;
+    int64_t next_effect_key = 0;
 
     /// A loss goes through the shields first (the oldest first); what is left reaches Health.
     double absorb(double loss, double now) {
@@ -188,10 +211,14 @@ CombatWorld::Npc* CombatWorld::combatant(uint64_t actor_id) {
     return make_combatant(*a);
 }
 
-Fighter* CombatWorld::fighter_of(uint64_t actor_id) { return combatant(actor_id); }
+Fighter* CombatWorld::fighter_of(uint64_t actor_id) {
+    if (PlayerPort* p = player(actor_id)) return &p->fighter();
+    return combatant(actor_id);
+}
 
 uint64_t CombatWorld::actor_of_object(uint64_t object_id) const {
     if (registry_.find(object_id)) return object_id;
+    for (const PlayerPort* p : players_) if (p->actor_id() == object_id || p->hit_component_guid().ObjectId == object_id) return p->actor_id();
     // the components the registry indexes: the cylinder (what the client names once the server exported it) and the interactable
     // [E1 stage 3 fix 3: no arithmetic on the id; the draft's "actor + 24" was another actor's component]
     if (const world::WorldActor* a = registry_.find_by_component(object_id)) return a->id;
@@ -199,12 +226,27 @@ uint64_t CombatWorld::actor_of_object(uint64_t object_id) const {
 }
 
 uint64_t CombatWorld::hit_component_of(uint64_t actor_id) const {
+    for (const PlayerPort* p : players_) if (p->actor_id() == actor_id) return p->hit_component_guid().ObjectId;
     const world::WorldActor* a = registry_.find(actor_id);
     return a ? a->npc.collision_cylinder : 0;
 }
 
 TargetInfo CombatWorld::inspect(uint64_t target_actor, const Fighter& from) {
     TargetInfo t;
+    if (PlayerPort* p = player(target_actor)) {
+        const Fighter& f = p->fighter();
+        t.exists = t.is_player = true;
+        t.alive = f.alive();
+        t.position = f.position();
+        t.radius_cm = f.radius_cm();
+        t.relation = data_.relation(from.alignments(), f.alignments());
+        t.surface_distance_cm = std::max(0.0, distance_xy_cm(from.position(), t.position) - from.radius_cm() - t.radius_cm);
+        if (nav_) {
+            const nav::Vec3 a = to_nav(from.position()), b = to_nav(t.position);
+            if (nav_->on_navmesh(a, 150, 300) && nav_->on_navmesh(b, 150, 300)) t.in_line_of_sight = nav_->line_of_sight(a, b);
+        }
+        return t;
+    }
     const world::WorldActor* a = registry_.find(target_actor);
     if (!a || a->kind != world::ActorKind::Npc) return t;
     t.exists = true;
@@ -464,13 +506,231 @@ Delivery CombatWorld::apply_hit_to_npc(uint64_t npc_actor, uint64_t attacker, co
         kill(*n, attacker, now);
     } else {
         think(*n, now);   // the fight starts in this step: the flags go up with the first exchange
+        shocked_reaction(*n, attacker, r, now);
     }
     return d;
+}
+
+Delivery CombatWorld::apply_hit(uint64_t target_actor, uint64_t attacker, const Resolved& r, double now) {
+    if (PlayerPort* p = player(target_actor)) {
+        Delivery d;
+        if (!cfg_.enabled || !p->fighter().alive()) return d;
+        IncomingHit in;
+        in.instigator = attacker;
+        in.hit_guid = r.hit_guid;
+        in.source_type = r.source_type;
+        in.source_guid = r.source_guid;
+        in.flags = r.flags;
+        in.mods = r.mods;
+        in.at = now;
+        if (!p->queue_hit(in, now)) return d;
+        d.applied = d.deferred_confirmation = true;
+        d.flags = r.flags;
+        return d;
+    }
+    return apply_hit_to_npc(target_actor, attacker, r, now);
+}
+
+void CombatWorld::sync_effects(Npc& n) {
+    std::vector<stats::ActiveEffect> active;
+    for (Npc::Effect& e : n.effects) {
+        auto tags = e.def->row.tags;
+        tags.insert(tags.end(), e.def->row.effect_tags.begin(), e.def->row.effect_tags.end());
+        active.push_back({{stats::kRefTypeEffect, e.def->row.guid}, e.stacks, std::move(tags), e.mods});
+        bootstrap::EffectItem item;
+        item.effect_id = e.key;
+        item.effect_guid = e.def->row.guid;
+        item.start_time = bootstrap::effect_clock(e.start);
+        item.duration = std::isinf(e.end) ? std::numeric_limits<float>::max() : static_cast<float>(e.end - e.start);
+        item.tick_time = static_cast<float>(e.def->row.tick_timer);
+        item.stacks = e.stacks;
+        PlayerPort* source = player(e.instigator);
+        e.array_id = write_effect(registry_, n.actor_id, e.array_id, source ? source->character_guid() : std::array<uint32_t, 4>{}, item);
+    }
+    n.cs->set_effects(std::move(active));
+    std::vector<stats::StatValue> changed;
+    std::string error;
+    if (n.cs->update({}, changed, error)) write_stats(registry_, n.actor_id, *n.cs);
+}
+
+void CombatWorld::remove_effect(Npc& n, size_t index) {
+    if (n.effects[index].array_id) erase_effect(registry_, n.actor_id, *n.effects[index].array_id);
+    n.effects.erase(n.effects.begin() + static_cast<std::ptrdiff_t>(index));
+    sync_effects(n);
+}
+
+void CombatWorld::clear_effects(Npc& n) {
+    for (const Npc::Effect& e : n.effects) if (e.array_id) erase_effect(registry_, n.actor_id, *e.array_id);
+    n.effects.clear();
+    sync_effects(n);
+}
+
+int CombatWorld::effect_count(uint64_t target_actor, int64_t effect_guid) {
+    Fighter* f = fighter_of(target_actor);
+    int count = 0;
+    if (f) for (const auto& e : f->stats().effects()) if (e.effect.guid == effect_guid) count += e.stacks;
+    return count;
+}
+
+bool CombatWorld::remove_effects_by_tag(uint64_t target_actor, const std::string& tag, int limit, double now) {
+    if (tag.empty() || limit <= 0 || !std::isfinite(now)) return false;
+    if (PlayerPort* p = player(target_actor)) return p->receive_effect_removal(tag, limit, now);
+    Npc* n = combatant(target_actor);
+    if (!n || n->dead) return false;
+    int removed = 0;
+    for (size_t i = 0; i < n->effects.size() && removed < limit;) {
+        const auto& row = n->effects[i].def->row;
+        const auto matches = [&](const auto& tags) { return std::any_of(tags.begin(), tags.end(), [&](const std::string& t) { return tag_matches(t, tag); }); };
+        if (matches(row.tags) || matches(row.effect_tags)) {
+            remove_effect(*n, i);
+            ++removed;
+        } else ++i;
+    }
+    return removed > 0;
+}
+
+bool CombatWorld::apply_effect(uint64_t target_actor, uint64_t instigator, int64_t effect_guid, int stacks,
+                               std::optional<double> duration, double now) {
+    if (!cfg_.enabled || stacks < 1 || !std::isfinite(now)) return false;
+    const abilities::EffectDef* def = catalog_.effect(effect_guid);
+    if (!def) return false;
+    Fighter* source = fighter_of(instigator);
+    if (PlayerPort* p = player(target_actor)) {
+        if (!p->fighter().alive() || !source || !source->alive()) return false;
+        std::string error;
+        auto evaluation = source->stats().evaluation(source->worn(), error, true);
+        if (!evaluation) return false;
+        auto snapshot = std::make_shared<EffectSource>();
+        snapshot->evaluation = std::move(evaluation);
+        if (PlayerPort* from = player(instigator)) {
+            snapshot->actor = from->actor_guid();
+            snapshot->character_guid = from->character_guid();
+        }
+        else if (const world::WorldActor* actor = registry_.find(instigator)) snapshot->actor = actor->actor.guid;
+        return p->receive_effect_from(effect_guid, stacks, duration, instigator, std::move(snapshot), now);
+    }
+    Npc* n = combatant(target_actor);
+    if (!n || n->dead || !source || !source->alive()) return false;
+    std::string error;
+    auto a = source->stats().evaluation(source->worn(), error, true);
+    auto target = n->cs->evaluation({}, error, true);
+    if (!a || !target || !a->set_actor(stats::kRoleTarget, *target, error)) return false;
+    EffectHost host([&](int fn, const std::string& name) {
+        if (fn == stats::role_fn(stats::kRoleTarget, stats::kRoleOpEffectRemaining)) {
+            const int64_t guid = std::strtoll(name.c_str(), nullptr, 10);
+            for (const auto& e : n->effects) if (e.def->row.guid == guid) return std::max(0.0, e.end - now);
+        }
+        return 0.0;
+    });
+    const auto eval = [&](int64_t expression, double& value) {
+        const int program = catalog_.program(expression);
+        return program >= 0 && a->eval(program, host, value, error) && std::isfinite(value);
+    };
+    double v = 0;
+    if (def->row.requirement_expr && (!eval(def->row.requirement_expr, v) || v == 0)) return false;
+    double seconds = std::numeric_limits<double>::infinity();
+    if (duration) {
+        if (!std::isfinite(*duration) || *duration < 0) return false;
+        seconds = *duration;
+    } else if (!def->row.infinite_duration) {
+        if (!def->row.duration_expr || !eval(def->row.duration_expr, seconds) || seconds < 0) return false;
+    }
+    std::vector<stats::EffectMod> mods;
+    for (const content::ModRow& m : def->mods) {
+        if (m.shield_absorb || !m.value_expr) continue;
+        if (!eval(m.value_expr, v)) return false;
+        mods.push_back({m.stat_guid, v});
+    }
+    int limit = std::clamp(def->row.global_stack_limit, 1, 4096);
+    if (def->row.in_place_stack_limit_expr && eval(def->row.in_place_stack_limit_expr, v)) limit = static_cast<int>(std::clamp(v, 1.0, 4096.0));
+    size_t existing = n->effects.size();
+    int same = 0;
+    for (size_t i = 0; i < n->effects.size(); ++i) if (n->effects[i].def == def) {
+        if (existing == n->effects.size()) existing = i;
+        ++same;
+    }
+    const bool separate = def->row.stack_type.find("StackSeperate") != std::string::npos;
+    const bool in_place = def->row.stack_type.find("StackInPlace") != std::string::npos;
+    const bool never_refresh = def->row.stack_duration_refresh.find("NeverRefresh") != std::string::npos;
+    const bool extend = def->row.stack_duration_refresh.find("ExtendDuration") != std::string::npos;
+    if (existing != n->effects.size() && !separate) {
+        Npc::Effect& e = n->effects[existing];
+        if (!never_refresh) {
+            double remaining = std::isinf(e.end) ? e.end : std::max(0.0, e.end - now);
+            if (extend && !duration && def->extension_expr && !eval(def->extension_expr, seconds)) return false;
+            if (extend) seconds += remaining;
+            if (extend && def->extended_maximum > 0) seconds = std::min(seconds, def->extended_maximum);
+            e.start = now;
+            e.end = now + seconds;
+            e.mods = std::move(mods);
+            e.instigator = instigator;
+        }
+        if (in_place) e.stacks = std::min(limit, e.stacks + std::min(stacks, 4096));
+        sync_effects(*n);
+        return true;
+    }
+    if (n->effects.size() >= 256 || (separate && same >= limit)) return false;
+    Npc::Effect e;
+    e.key = n->next_effect_key++;
+    e.def = def;
+    e.instigator = instigator;
+    e.stacks = in_place ? std::min(stacks, limit) : 1;
+    e.start = now;
+    e.end = now + seconds;
+    e.mods = std::move(mods);
+    n->effects.push_back(std::move(e));
+    sync_effects(*n);
+    return true;
+}
+
+void CombatWorld::tick_effects(Npc& n, double now) {
+    for (size_t i = 0; i < n.effects.size();) {
+        if (n.effects[i].end <= now) remove_effect(n, i);
+        else ++i;
+    }
+}
+
+void CombatWorld::shocked_reaction(Npc& n, uint64_t attacker, const Resolved& incoming, double now) {
+    // Shocked's reaction accepts damaging direct hits, excluding reactions and ordinary effect ticks.
+    if (incoming.miss() || incoming.source_type == content::kSourceTypeReaction || incoming.source_type == content::kSourceTypeEffect) return;
+    bool damage = false;
+    for (const auto& m : incoming.mods) damage = damage || (m.stat_guid == data_.ids().health && m.value < 0);
+    if (!damage) return;
+    const abilities::EffectDef* shocked = catalog_.effect_named("Status_Shocked");
+    const abilities::HitDef* hit = catalog_.hit_named("Mage_Status_Shocked_ReactedHit");
+    Fighter* source = fighter_of(attacker);
+    if (!shocked || !hit || !source) return;
+    auto it = std::find_if(n.effects.begin(), n.effects.end(), [&](const Npc::Effect& e) { return e.def == shocked; });
+    if (it == n.effects.end()) return;
+    HitMeta meta;
+    meta.source_type = content::kSourceTypeReaction;
+    meta.source_guid = 6064628911287762946ll; // Mage_Status_Shocked_Reaction, the effect's data-defined reaction record.
+    Resolved resolved;
+    std::string error;
+    if (!resolver_.resolve(*source, n, *hit, meta, resolved, error)) return;
+    const size_t index = static_cast<size_t>(it - n.effects.begin());
+    if (--n.effects[index].stacks <= 0) remove_effect(n, index);
+    else sync_effects(n);
+    const Delivery delivery = apply_hit_to_npc(n.actor_id, attacker, resolved, now);
+    if (PlayerPort* p = player(attacker); p && delivery.applied) {
+        IncomingHit in;
+        in.instigator = attacker;
+        in.hit_guid = hit->row.guid;
+        in.source_type = meta.source_type;
+        in.source_guid = meta.source_guid;
+        in.flags = delivery.flags;
+        in.mods = resolved.mods;
+        in.at = now;
+        double taken = 0;
+        for (size_t i = 0; i < resolved.mods.size(); ++i) if (resolved.mods[i].stat_guid == data_.ids().health) taken -= delivery.effective[i];
+        p->confirm_hit_on(in, n.actor_id, taken, delivery.lethal, now);
+    }
 }
 
 void CombatWorld::kill(Npc& n, uint64_t killer, double now) {
     if (n.dead) return;
     n.dead = true;
+    clear_effects(n);
     n.killer = killer;
     n.ai.kill();
     n.cs->set_in_combat(false);
@@ -513,6 +773,7 @@ void CombatWorld::begin_reset(Npc& n, double now) {
     (void)now;
     ++stats_.resets;
     n.returning = true;
+    clear_effects(n);
     n.attackers.clear();
     // it heals to full as it walks home
     if (const stats::StatValue* max = n.cs->find(data_.ids().max_health)) {
@@ -581,6 +842,7 @@ void CombatWorld::tick(double now) {
     now_ = now;
     if (!cfg_.enabled) return;
     resolve_pending(now);
+    for (auto& [id, n] : npcs_) if (!n->dead) tick_effects(*n, now);
     if (now < next_think_) return;
     next_think_ = now + cfg_.think_seconds;
 

@@ -12,6 +12,7 @@
 // Without a content.db the test says so and is skipped.
 // ============================================================================
 #include "ability_rig.h"
+#include "bootstrap/constants.h"
 #include "combat_rig.h"
 #include "combat/combat_data.h"
 #include "combat/hit_resolver.h"
@@ -240,6 +241,7 @@ void test_captured_npcs(Fixture& f) {
 
 #include "combat_tests.inc"
 #include "combat_tests2.inc"
+#include "combat_target_effects.inc"
 
 }  // namespace
 
@@ -263,6 +265,10 @@ int main() {
     test_player_cast(f);
     test_npc_hits_player(f);
     test_combat_flag(f);
+    test_target_effects(f);
+    test_shocked_reaction(f);
+    test_rejected_player_hit(f);
+    test_effect_source_snapshot(f);
     std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

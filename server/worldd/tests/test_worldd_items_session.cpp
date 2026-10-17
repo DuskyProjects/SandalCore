@@ -651,11 +651,12 @@ struct Harness {
         for (; mirrored < got.size(); ++mirrored) mirror.absorb(got[mirrored], pc_ch, pawn_ch, got[mirrored].channel);
     }
     void client_sends(std::vector<fake::Bunch> bunches) {
-        const auto pkt = client.packet(std::move(bunches));
-        const std::vector<InBunch> in = conn.receive(pkt, t);
-        s->take_acks(conn);
-        for (const InBunch& b : in) s->on_bunch(conn, b, t);
-        s->end_of_datagram(conn);
+        for (const auto& pkt : client.packets(std::move(bunches))) {
+            const std::vector<InBunch> in = conn.receive(pkt, t);
+            s->take_acks(conn);
+            for (const InBunch& b : in) s->on_bunch(conn, b, t);
+            s->end_of_datagram(conn);
+        }
     }
     void step(milliseconds d = milliseconds(20)) {
         t += d;
@@ -1657,10 +1658,10 @@ struct Joined {
     std::vector<fake::Delivered> got;
 };
 
-static Joined handshake(Rig& rig, const Address& addr, Clock::time_point now) {
+static Joined handshake(Rig& rig, const Address& addr, Clock::time_point now,
+                        std::vector<uint8_t> initial = capture::bytes(capture::kInitial)) {
     Joined j;
     rig.take(addr);
-    const auto initial = capture::bytes(capture::kInitial);
     rig.ep.on_datagram(addr, initial.data(), initial.size(), now);
     auto out = rig.take(addr);
     if (out.size() != 1) return j;
@@ -1716,7 +1717,7 @@ struct Endpoints {
     std::unique_ptr<CharacterSaver> saver;
     EndpointConfig cfg;
     std::unique_ptr<Rig> rig;
-    Endpoints() {
+    explicit Endpoints(const char* real_path = nullptr) : fx(real_path != nullptr, real_path) {
         saver = std::make_unique<CharacterSaver>(api, quick());
         fx.world->set_position_sink(saver.get());
         cfg.players = fx.world.get();
@@ -2802,8 +2803,11 @@ static void test_d1_level_scroll() {
     CHECK(stats_match(h, &why) && h.mirror.stat_updates.size() == stat_updates + 1, "the stats of level 10 went out in one update and the client's arrays are the session's");
     if (!why.empty()) std::printf("    %s\n", why.c_str());
     const float max_stamina_after = cs->find(content::kGuidMaxStamina)->value;
-    CHECK(max_stamina_after > max_stamina_before && cs->level() == 10 && cs->passives().size() == 1 && cs->passives()[0].mods.size() == 1 && cs->passives()[0].mods[0].value == 10,
+    const auto endurance = std::find_if(cs->passives().begin(), cs->passives().end(), [](const auto& e) { return e.effect.guid == gm::kStamBoost1Effect; });
+    CHECK(max_stamina_after > max_stamina_before && cs->level() == 10 && endurance != cs->passives().end() && endurance->mods.size() == 1 && endurance->mods[0].value == 10,
           "MaxStamina rose (the level, and Endurance Training I's +10 is among the engine's inputs, as an effect)");
+    CHECK(std::any_of(cs->passives().begin(), cs->passives().end(), [](const auto& e) { return e.effect.guid == 6064631088536030054ll && e.mods.empty(); }),
+          "Resonant Weapon is among the engine's inputs even though it has no constant stat mods");
     CHECK(h.mirror.effects_added == 3 && h.mirror.effects_removed == 0, "three CurrentEffects items: the granted passives (Sprint Training's 1 s marker, Endurance Training, Resonant Weapon)");
     size_t infinite = 0, markers = 0;
     for (const auto& [id, e] : h.mirror.effect_items) (e.duration > 1e30f ? infinite : markers) += e.duration == 1.0f || e.duration > 1e30f ? 1 : 0;
@@ -2948,7 +2952,10 @@ static void test_d1_relog() {
     const repl::Subobject* base_info = h.s->bootstrap().pawn().find(h.s->bootstrap().setup().guids.base_character_info);
     const repl::Value* level_value = base_info ? base_info->obj.state.get(*base_info->obj.schema, "Level") : nullptr;
     const int64_t* pawn_level = level_value ? level_value->get_if<int64_t>() : nullptr;
-    CHECK(pawn_level && *pawn_level == 10 && h.s->character_stats()->level() == 10 && h.s->character_stats()->passives().size() == 1, "the pawn's Level is 10 and the stats were computed with Endurance Training I");
+    const auto& passives = h.s->character_stats()->passives();
+    CHECK(pawn_level && *pawn_level == 10 && h.s->character_stats()->level() == 10 &&
+              std::any_of(passives.begin(), passives.end(), [](const auto& e) { return e.effect.guid == gm::kStamBoost1Effect; }),
+          "the pawn's Level is 10 and the stats were computed with Endurance Training I");
     // a record whose XP trails its level: the threshold
     svc::Character t = record_with_scrolls();
     t.level = 5;
@@ -4209,6 +4216,7 @@ static void test_d1s2_shapes() {
     };
     using V = std::vector<std::string>;
     Harness h(bard_at(25));
+    const size_t persistent_at_join = h.mirror.effect_items.size();
     const int64_t bard = tree_guid(h, "Bard");
     const auto rank = [&](const char* name) { return rank_named(h, "Bard", name); };
     // S5: several ranks in one call: one abilities update, one list, a skill update for each
@@ -4231,7 +4239,7 @@ static void test_d1s2_shapes() {
     h.step(milliseconds(150));
     from = h.mirror.sequence.size();
     h.request(purchase_rpc(build_of({{passive, bard, false}})), h.pawn_ch);
-    CHECK(seq(h, from) == (V{"E-", "L"}) && h.mirror.effect_items.empty(), "S6b a refund of a passive: E- L, and its item is gone");
+    CHECK(seq(h, from) == (V{"E-", "L"}) && h.mirror.effect_items.size() == persistent_at_join, "S6b a refund of a passive: E- L, and only the persistent join effects remain");
     // S8b: a respec of a tree with abilities and a passive: A, the removals, L
     h.step(milliseconds(150));
     h.request(purchase_rpc(build_of({{passive, bard, true}})), h.pawn_ch);
@@ -4475,11 +4483,258 @@ static void test_resource_no_room_at_login() {
     CHECK(inv.size() == bard_items().size() + 7, "every item is still there");
 }
 
-int main() {
+static void test_endpoint_reconnect_keeps_live_progress(const char* profession_path = nullptr) {
+    std::printf("review: reconnect keeps live progress while the login record is stale\n");
+    for (int mode = 0; mode != 4; ++mode) {
+        const bool same_address = mode == 1 || mode == 2;
+        const bool same_ticket = mode == 1;
+        std::printf("    (%s)\n", mode == 3 ? "two takeovers before the middle client joins" : mode == 0 ? "another address" : same_ticket ? "same address, accepted ticket retry" : "same address, new ticket");
+        RecordingSink sink;
+        Endpoints e(profession_path);
+        e.fx.world->set_position_sink(&sink);
+        Rig& rig = *e.rig;
+        svc::Character stale = record_with_scrolls();
+        stale.experience.push_back({content::kGuidAdventuring, 0, 7});
+        // A different leveling type is outside the live Adventuring runtime and must survive its overlay.
+        stale.experience.push_back({1234567, 99, 3});
+        if (profession_path) {
+            CHECK(e.fx.world->professions() && e.fx.world->professions()->size() == 22, "(the real content has all 22 professions)");
+            if (!e.fx.world->professions()) continue;
+            stale.professions.push_back({g2::kMining, 0, 1, 0});
+            stale.items.push_back(make_item(Bag, 8, g2::kMining25, 900));
+        }
+        Joined a = handshake(rig, kA, t0);
+        CHECK(a.client.has_value(), "(the first client completed its handshake)");
+        if (!a.client) continue;
+        join_world(rig, a, kA, stale, t0);
+        Clock::time_point now = t0 + milliseconds(60);
+        const auto settle = [&](Joined& j, const Address& addr) {
+            for (int quiet = 0, i = 0; quiet < 3 && i != 400; ++i) {
+                now += milliseconds(20);
+                const size_t before = j.got.size();
+                exchange(rig, j, addr, {}, now);
+                const PlayerSession* p = rig.ep.player_at(addr);
+                quiet = p && j.got.size() == before && p->join_pending() == 0 && p->replies_pending() == 0 ? quiet + 1 : 0;
+            }
+        };
+        settle(a, kA);
+        const PlayerSession* old = rig.ep.player_at(kA);
+        CHECK(old != nullptr, "(the first client joined)");
+        if (!old) continue;
+        if (profession_path) {
+            e.use(a, kA, 3, 8, guid_n(900), now += milliseconds(150));
+            settle(a, kA);
+            const professions::State mining = old->professions().state(g2::kMining);
+            CHECK(mining.tier == 2 && mining.level == 25 && mining.xp > 0,
+                  "(the live character gained Mining XP, levels and certification while the login remains Novice)");
+        }
+        e.use(a, kA, 3, 4, guid_n(210), now += milliseconds(150));   // level 10, and pay the seven XP debt
+        settle(a, kA);
+        exchange(rig, a, kA, {a.client->actor(old->channel_of(bs::Role::Pawn), purchase_rpc(build_of({{kInstrumentFlute, kBardTree, true}})), true)}, now += milliseconds(150));
+        settle(a, kA);
+        e.use(a, kA, 3, 6, guid_n(212), now += milliseconds(150));   // Tank, retaining the Bard's bought ranks
+        settle(a, kA);
+        repl::ActionbarSlot slot;
+        slot.bank_index = 1;
+        slot.slot_index = 7;
+        slot.use.use_type = repl::ActionbarUseType::Ability;
+        slot.use.ability_id = content::kGuidSprint;
+        slot.use.combo_button = 3;
+        exchange(rig, a, kA, {a.client->actor(old->channel_of(bs::Role::PlayerController), set_slot_rpc(slot), true)}, now += milliseconds(150));
+        settle(a, kA);
+        const leveling::Progress expected_progress = old->progress();
+        const auto expected_ranks = old->talents()->purchased();
+        const actionbar::Bar expected_bar = old->action_bar();
+        const items::Inventory expected_items = old->inventory();
+        const auto expected_professions = old->professions().to_svc();
+        std::printf("    live state: level %d, XP %lld, debt %lld, class %d\n", expected_progress.level,
+                    static_cast<long long>(expected_progress.xp), static_cast<long long>(expected_progress.debt), old->class_id());
+        CHECK(expected_progress.level == 10 && expected_progress.xp > stale.experience.front().xp && expected_progress.debt == 0 && old->class_id() == 7,
+              "(the live character gained levels, XP, paid debt and changed class)");
+        CHECK(expected_ranks.contains(kBardTree) && expected_ranks.at(kBardTree) == std::vector<int64_t>{kInstrumentFlute} &&
+                  expected_bar.at(1, 7) && expected_bar.at(1, 7)->combo_button == 3,
+              "(the live character also bought a talent and arranged its bar)");
+
+        auto initial = capture::bytes(capture::kInitial);
+        if (mode == 2) {
+            auto parsed = conn::parse_handshake(initial.data(), initial.size());
+            parsed->ext->bytes[54] ^= 1;   // a fresh ticket, the same character
+            initial = conn::build_handshake(*parsed);
+        }
+        const Address addr = mode == 3 ? Address{0x7F000001u, 50512} : same_address ? kA : kB;
+        if (mode == 3) {
+            Joined middle = handshake(rig, kB, now += milliseconds(150));
+            CHECK(middle.client.has_value(), "(the middle client completed its handshake)");
+            if (!middle.client) continue;
+            log_in(rig, middle, kB, stale, now += milliseconds(20));
+            now += milliseconds(20);
+            CHECK(rig.ep.session_of(kCyb) == kB && rig.ep.player_at(kB) == nullptr,
+                  "(the middle client owns the login but has not joined the world)");
+        }
+        Joined b = handshake(rig, addr, now += milliseconds(150), std::move(initial));
+        CHECK(b.client.has_value(), "(the replacement client completed its handshake)");
+        if (!b.client) continue;
+        if (same_ticket) {
+            CHECK(rig.logins.submitted.size() == 1, "the accepted ticket retry submits no second login");
+            exchange(rig, b, addr, {b.client->hello()}, now += milliseconds(20));
+            exchange(rig, b, addr, {b.client->login(kMachine, kMachine)}, now += milliseconds(20));
+            exchange(rig, b, addr, {b.client->netspeed(200000), b.client->nmt(conn::Nmt::Join)}, now += milliseconds(20));
+        } else {
+            join_world(rig, b, addr, stale, now += milliseconds(20));
+            now += milliseconds(40);
+        }
+        settle(b, addr);
+        const PlayerSession* replacement = rig.ep.player_at(addr);
+        CHECK(replacement && replacement->progress() == expected_progress && replacement->class_id() == 7,
+              "the replacement uses the live level, class, XP and debt instead of the stale login record");
+        if (profession_path) {
+            CHECK(replacement && replacement->professions().to_svc() == expected_professions,
+                  "the replacement keeps all live profession XP, levels and certifications instead of stale rows");
+        }
+        CHECK(replacement && replacement->talents() && replacement->talents()->purchased() == expected_ranks && replacement->action_bar() == expected_bar,
+              "the replacement retains the live bought ranks and every action-bar slot");
+        CHECK(replacement && replacement->inventory() == expected_items,
+              "the replacement retains the consumed scrolls and live inventory");
+
+        // Discard the old session's hand-overs, as a service outage could; the replacement must retry its inherited state at its end.
+        sink.progress.clear();
+        sink.inventories.clear();
+        exchange(rig, b, addr, {b.client->close_channel()}, now += milliseconds(150));
+        rig.ep.tick(now + seconds(2));
+        CHECK(!sink.progress.empty() && sink.progress.back().second.level == expected_progress.level && sink.progress.back().second.class_id == 7 &&
+                  sink.progress.back().second.experience == (std::vector<svc::Experience>{{content::kGuidAdventuring, expected_progress.xp, expected_progress.debt}}),
+              "an unchanged replacement re-hands inherited progress to persistence when it quits");
+        CHECK(!sink.inventories.empty() && same_items(sink.inventories.back().items, expected_items.items()),
+              "an unchanged replacement also re-hands inherited inventory to persistence when it quits");
+        if (profession_path) {
+            CHECK(!sink.progress.empty() && sink.progress.back().second.professions == expected_professions,
+                  "an unchanged replacement re-saves every inherited profession after earlier saves are discarded");
+        }
+    }
+}
+
+static void test_persistent_talent_effect_lifecycle() {
+    std::printf("persistent talent effects survive login and follow the active class and weapon\n");
+    Fixture source;
+    const tl::Catalog& catalog = *source.world->talents();
+    const auto find = [&](const char* tree_name, const char* rank_name) {
+        const tl::Tree* tree = catalog.tree_named(tree_name);
+        if (tree) {
+            for (const tl::Node& node : tree->nodes)
+                for (const tl::Rank& rank : node.ranks)
+                    if (rank.name == rank_name) return tl::RankRef{tree, &node, &rank};
+        }
+        return tl::RankRef{};
+    };
+    const tl::RankRef scepter = find("Weapon_1H_Scepter", "Weapon_Finisher_Stagger");
+    const tl::RankRef book = find("Weapon_Ranged_Book", "Weapon_Finisher_Volatile");
+    const tl::RankRef flute = find("Bard", "Bard_Passive_Instrument_Flute");
+    CHECK(scepter.ok() && book.ok() && flute.ok() && scepter.rank->effect_infinite && book.rank->effect_infinite,
+          "(the fixture has distinct permanent passives for both carried weapon lines)");
+    if (!scepter.ok() || !book.ok() || !flute.ok()) return;
+    tl::Book legal(catalog, cf::kBard, 25);
+    CHECK(legal.plan(build_of({{scepter.rank->guid, scepter.tree->guid, true}, {book.rank->guid, book.tree->guid, true}})).ok,
+          "(both stored weapon ranks can legally be purchased by this character)");
+    svc::Character record = bard_at(25);
+    record.skill_ranks.push_back({scepter.tree->guid, {scepter.rank->guid}});
+    record.skill_ranks.push_back({book.tree->guid, {book.rank->guid}});
+    Harness h(record);
+    const int64_t resonance = 6064631088536030054ll;
+    const int64_t flute_marker = flute.rank->effect;
+    const auto count = [&](int64_t effect) {
+        return std::count_if(h.mirror.effect_items.begin(), h.mirror.effect_items.end(), [&](const auto& item) { return item.second.guid == effect; });
+    };
+    CHECK(count(resonance) == 1 && count(scepter.rank->effect) == 1 && count(book.rank->effect) == 0,
+          "login restores class and selected-weapon passive items exactly once");
+    CHECK(count(flute_marker) == 0 && h.s->effect_markers_pending() == 0,
+          "login does not replay finite grant markers for previously purchased ranks");
+    h.request(ranged_rpc(true), h.pawn_ch);
+    CHECK(count(scepter.rank->effect) == 0 && count(book.rank->effect) == 1 && count(resonance) == 1,
+          "a weapon swap removes the old line's passive and restores the new line's passive");
+    h.step(milliseconds(150));
+    h.request(ranged_rpc(false), h.pawn_ch);
+    CHECK(count(scepter.rank->effect) == 1 && count(book.rank->effect) == 0,
+          "swapping back restores one item without retaining the previous weapon's item");
+    const size_t added = h.mirror.effects_added;
+    h.step(milliseconds(150));
+    h.request(ranged_rpc(false), h.pawn_ch);
+    CHECK(h.mirror.effects_added == added, "selecting the current weapon again does not duplicate its passive");
+    h.request(purchase_rpc(build_of({{scepter.rank->guid, scepter.tree->guid, false}})), h.pawn_ch);
+    CHECK(count(scepter.rank->effect) == 0 && count(resonance) == 1,
+          "refunding a restored weapon passive removes its item and retains class passives");
+    h.step(milliseconds(150));
+    h.request(purchase_rpc(build_of({{scepter.rank->guid, scepter.tree->guid, true}})), h.pawn_ch);
+    CHECK(count(scepter.rank->effect) == 1, "buying the refunded passive again restores exactly one item");
+    h.step(milliseconds(150));
+    h.request(item_used(4, 15, guid_n(115)), h.pawn_ch);
+    CHECK(count(scepter.rank->effect) == 0 && count(resonance) == 1,
+          "unequipping the selected weapon removes its passive item");
+    int scepter_slot = -1;
+    for (const svc::InventoryItem& item : h.s->inventory().items()) {
+        if (item.instance_guid == guid_n(115) && item.container == Bag) scepter_slot = item.slot;
+    }
+    CHECK(scepter_slot >= 0, "(the unequipped Scepter is in the backpack)");
+    if (scepter_slot < 0) return;
+    h.step(milliseconds(150));
+    h.request(item_used(3, scepter_slot, guid_n(115)), h.pawn_ch);
+    CHECK(count(scepter.rank->effect) == 1, "equipping the selected weapon restores its passive item");
+    h.step(milliseconds(150));
+    h.request(item_used(4, 17, guid_n(117)), h.pawn_ch);   // leave the ranged set empty
+    h.step(milliseconds(150));
+    h.request(ranged_rpc(true), h.pawn_ch);
+    CHECK(count(scepter.rank->effect) == 0 && count(book.rank->effect) == 0 && count(resonance) == 1,
+          "selecting an empty weapon set disables every weapon-line passive");
+    h.step(milliseconds(150));
+    h.request(ranged_rpc(false), h.pawn_ch);
+    CHECK(count(scepter.rank->effect) == 1, "returning from the empty set restores the melee passive");
+    h.step(milliseconds(150));
+    h.request_both(item_used(3, 6, guid_n(212)), item_activate(3, 6, guid_n(212)));
+    CHECK(h.s->class_id() == 7 && count(resonance) == 0 && count(scepter.rank->effect) == 1,
+          "changing class removes the old class's persistent item and preserves the weapon passive");
+    h.step(milliseconds(150));
+    h.request_both(item_used(3, 7, guid_n(213)), item_activate(3, 7, guid_n(213)));
+    CHECK(h.s->class_id() == 2 && count(resonance) == 1 && count(scepter.rank->effect) == 1,
+          "returning to the class restores its effect-only passive exactly once");
+    const svc::Progress saved = h.s->progress_snapshot();
+    record.level = saved.level;
+    record.class_id = saved.class_id;
+    record.experience = saved.experience;
+    record.skill_ranks = saved.skill_ranks;
+    record.action_bar = saved.action_bar;
+    record.items = h.s->inventory().items();
+    Harness relog(record);
+    const auto relog_count = [&](int64_t effect) {
+        return std::count_if(relog.mirror.effect_items.begin(), relog.mirror.effect_items.end(), [&](const auto& item) { return item.second.guid == effect; });
+    };
+    CHECK(relog_count(resonance) == 1 && relog_count(scepter.rank->effect) == 1 && relog_count(flute_marker) == 0 &&
+              !h.s->abilities_failed() && !relog.s->abilities_failed() && h.mirror.unreadable == 0 && relog.mirror.unreadable == 0,
+          "a relog restores persistent items without replaying finite markers or producing invalid updates");
+}
+
+int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);   // (a crash must not take the last results with it)
     auto logger = std::make_shared<spdlog::logger>("test", std::make_shared<spdlog::sinks::ostream_sink_mt>(g_log));
     logger->set_level(spdlog::level::debug);
     spdlog::set_default_logger(logger);
+
+    if (argc == 2 && std::string(argv[1]) == "--talent-passives") {
+        test_persistent_talent_effect_lifecycle();
+        std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
+        return g_fail == 0 ? 0 : 1;
+    }
+
+    if (argc == 2 && std::string(argv[1]) == "--reconnect-only") {
+        test_endpoint_reconnect_keeps_live_progress();
+        std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
+        return g_fail == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--reconnect-professions") {
+        const char* path = professions_db_path();
+        CHECK(path != nullptr, "the real content database is present for profession reconnect coverage");
+        if (path) test_endpoint_reconnect_keeps_live_progress(path);
+        std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
+        return g_fail == 0 ? 0 : 1;
+    }
 
     test_join();
     test_unequip_and_equip_the_chest();
@@ -4545,6 +4800,10 @@ int main() {
     test_resource_requests();
     test_resource_repair();
     test_resource_no_room_at_login();
+    test_persistent_talent_effect_lifecycle();
+    test_endpoint_reconnect_keeps_live_progress();
+    if (const char* path = professions_db_path()) test_endpoint_reconnect_keeps_live_progress(path);
+    else std::printf("profession reconnect coverage: skipped (no real content.db)\n");
     test_real_content_db();
 
     std::printf("\n%d passed, %d failed\n", g_pass, g_fail);

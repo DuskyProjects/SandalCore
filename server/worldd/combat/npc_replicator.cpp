@@ -160,4 +160,31 @@ bool read_stat(const world::WorldActor& actor, int64_t record, float& value) {
     return false;
 }
 
+std::optional<int32_t> write_effect(world::ActorRegistry& registry, uint64_t actor_id, std::optional<int32_t> array_id,
+                                   const std::array<uint32_t, 4>& instigator, const bootstrap::EffectItem& item) {
+    std::optional<int32_t> out;
+    registry.modify(actor_id, world::Change::State, [&](world::WorldActor& a) {
+        repl::Subobject* st = find_sub(a, "UAoCStatsComponent");
+        repl::FastArrayState* arr = st && st->obj.schema ? st->obj.arrays.get(*st->obj.schema, "CurrentEffects") : nullptr;
+        if (!arr) return;
+        auto values = bootstrap::effect_item_state(instigator, item);
+        if (array_id) {
+            if (arr->change(*array_id, std::move(values))) out = array_id;
+        } else {
+            out = arr->add(std::move(values));
+        }
+    });
+    return out;
+}
+
+bool erase_effect(world::ActorRegistry& registry, uint64_t actor_id, int32_t array_id) {
+    bool changed = false;
+    registry.modify(actor_id, world::Change::State, [&](world::WorldActor& a) {
+        repl::Subobject* st = find_sub(a, "UAoCStatsComponent");
+        repl::FastArrayState* arr = st && st->obj.schema ? st->obj.arrays.get(*st->obj.schema, "CurrentEffects") : nullptr;
+        changed = arr && arr->remove(array_id);
+    });
+    return changed;
+}
+
 }  // namespace aoc::worldd::combat

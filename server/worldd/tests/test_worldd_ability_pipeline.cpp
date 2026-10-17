@@ -199,6 +199,30 @@ void test_mana_costs() {
 
 void test_resonance_and_fortissimo() {
     std::printf("Resonance and Fortissimo\n");
+    Rig before_resonant_weapon(2, 4, kTalents);
+    CHECKF(before_resonant_weapon.ok(), "the level-4 rig: %s", before_resonant_weapon.problem.c_str());
+    if (!before_resonant_weapon.ok()) return;
+    before_resonant_weapon.know({"Bard_Misc_Flourish"});
+    const int64_t resonance_before_passive = before_resonant_weapon.effect("Bard_Resonance");
+    CHECK(before_resonant_weapon.trigger("Bard_Misc_Flourish", 2.0) == Refusal::None, "a level-4 Bard can cast Flourish");
+    before_resonant_weapon.run_to(2.4);
+    CHECK(before_resonant_weapon.pipe->stacks_of(resonance_before_passive) == 0, "a Bard without Resonant Weapon does not gain Resonance from a Mana cost");
+
+    Rig completion(2, 25);
+    CHECKF(completion.ok(), "the completion-stack rig: %s", completion.problem.c_str());
+    if (!completion.ok()) return;
+    completion.know({"Bard_Dance_Shielding"});
+    CHECK(completion.trigger("Bard_Dance_Shielding", 2.0) == Refusal::None, "a longer dance is accepted");
+    completion.run_to(2.31);   // default cost +300 ms, completion hit +335 ms
+    CHECKF(completion.pipe->stacks_of(completion.effect("Bard_Resonance")) == 1,
+           "the consume step grants one stack before the completion hit (got %d)", completion.pipe->stacks_of(completion.effect("Bard_Resonance")));
+    completion.run_to(2.9);
+    CHECK(completion.pipe->stacks_of(completion.effect("Bard_Resonance")) == 2, "the dance completion grants its additional stack");
+    CHECK(completion.hit_request("Bard_Dance_Shielding", "Bard_AddResonance", 3.1) == AbilityPipeline::HitVerdict::Scheduled,
+          "a repeated completion-hit request is handled within the cast window");
+    completion.run_to(3.5);
+    CHECK(completion.pipe->stacks_of(completion.effect("Bard_Resonance")) == 2, "repeating the request cannot grant another completion stack");
+
     Rig r(2, 25, kTalents);
     CHECKF(r.ok(), "the rig: %s", r.problem.c_str());
     if (!r.ok()) return;
@@ -222,7 +246,7 @@ void test_resonance_and_fortissimo() {
     CHECK(r.pawn.effect(r.effect("Bard_Fortissimo")) != nullptr && r.pawn.effect(r.effect("Bard_Fortissimo"))->duration == 8.0f &&
               find_event(seen, [&](const Seen& s) { return effect_added(s, r.effect("Bard_Fortissimo")) && near(s.at, 4.3, 1e-9); }),
           "Fortissimo's own effect lasts 8 s and comes in the same packet (no montage, no hit delay)");
-    // Resonance climbs one a cast to 10 and stays there
+    // Every qualifying cast grants one; the explicit completion hit of a longer dance grants another.
     double t = 10.0;
     const char* casts[] = {"Bard_Dance_Maddening", "Bard_Misc_Misdirection", "Bard_Dance_Nimble", "Bard_Dance_Shielding", "Bard_Dance_Mesmerizing", "Bard_Misc_Flourish", "Bard_Misc_Flourish",
                            "Bard_Misc_QuickWit_Jest", "Bard_Story_Joy", "Bard_Misc_GetOffTheStage"};
@@ -232,7 +256,9 @@ void test_resonance_and_fortissimo() {
         const Refusal rf = r.trigger(name, t, name == std::string("Bard_Dance_Nimble") || name == std::string("Bard_Misc_QuickWit_Jest") || name == std::string("Bard_Story_Joy"));
         CHECKF(rf == Refusal::None, "%s accepted (%s)", name, refusal_name(rf));
         r.run_to(t + 3.0);
-        expect = std::min(10, expect + 1);
+        const bool completion_bonus = std::string(name) == "Bard_Dance_Maddening" || std::string(name) == "Bard_Dance_Nimble" ||
+                                      std::string(name) == "Bard_Dance_Shielding";
+        expect = std::min(10, expect + (completion_bonus ? 2 : 1));
         CHECKF(r.pawn.stat(kResonanceStat) == static_cast<float>(expect), "after %s Resonance is %d", name, expect);
         t += 4.0;
         r.run_to(t);
@@ -1147,12 +1173,107 @@ void test_dance_zones() {
     CHECK(m.pawn.broken.empty() && m.pawn.effect(shielding_aura) == nullptr, "(the pawn took every change; no Aura is left)");
 }
 
-int main() {
+void test_held_release_during_startup() {
+    std::printf("a held key released before its effect starts stays released\n");
+    for (double release_after : {0.1, 0.31, 0.5}) {
+        Rig r(2, 25);
+        CHECKF(r.ok(), "the Guard rig: %s", r.problem.c_str());
+        if (!r.ok()) continue;
+        r.asks = false;
+        r.know({"General_Guard"});
+        const int64_t guard = r.effect("General_Guard");
+        const int32_t id = r.next_client_id;
+        CHECK(r.trigger("General_Guard", 2.0) == Refusal::None, "Guard is accepted");
+        CHECK(r.pipe->cancel(id, 2.0 + release_after), "the release names the accepted client instance");
+        r.take();
+        r.run_to(3.0);
+        CHECKF(r.pipe->stacks_of(guard) == 0 && !r.pawn.effect(guard),
+               "release at +%.2f s leaves no infinite Guard effect", release_after);
+        r.run_to(5.0);
+        CHECK(r.pipe->stacks_of(guard) == 0 && r.pawn.broken.empty(), "the cancelled effect cannot start again later");
+    }
+}
+
+void test_death_ends_transient_ability_state() {
+    std::printf("death ends transient effects, pending hits and zones, preserving persistent effects and cooldowns\n");
+    Rig r(2, 25, kTalents);
+    CHECKF(r.ok(), "the death rig: %s", r.problem.c_str());
+    if (!r.ok()) return;
+    r.asks = false;
+    r.know({"Bard_Music_Cheerful", "Bard_Dance_Shielding", "Bard_Story_Joy"});
+    const int64_t song = r.effect("Bard_Music_Cheerful_Self"), buff = r.effect("Bard_Music_Cheerful_Buff");
+    const int64_t persistent = r.effect("Ranger_Passive_HuntOfTheBadger");
+    CHECK(r.catalog->effect(persistent) && r.catalog->effect(persistent)->row.persists_through_death,
+          "the retained effect is explicitly marked to persist through death");
+    CHECK(r.trigger("Bard_Music_Cheerful", 2.0) == Refusal::None, "the song starts");
+    r.run_to(4.4);
+    CHECK(r.pipe->stacks_of(song) > 0 && r.pipe->stacks_of(buff) > 0, "the song and its healing buff are active");
+    CHECK(r.pipe->grant_effect(persistent, 1, 4.4), "the persistent effect is granted");
+    r.take();
+    CHECK(r.trigger("Bard_Dance_Shielding", 4.5) == Refusal::None, "a zone is cast");
+    r.run_to(5.0);
+    CHECK(r.trigger("Bard_Story_Joy", 5.0, true) == Refusal::None, "a healing cast is accepted before death");
+    CHECK(r.hit_request("Bard_Story_Joy", "Bard_Story_Joy", 5.01) == AbilityPipeline::HitVerdict::Scheduled,
+          "its hit is pending when the character dies");
+    CHECK(r.a7->trigger(content::kGuidSprint, 500, 5.01) == Refusal::None && r.a7->sprinting(),
+          "the bridge-owned Sprint is also active before death");
+    r.take();
+    r.run_to(5.1);
+    const size_t cooldowns = r.pipe->cooldowns_running();
+    r.set_current(content::kGuidHealth, 0);
+    r.set_current(content::kGuidMana, 0);
+    r.pipe->set_dead(true);
+    r.take();
+    CHECK(!r.a7->sprinting(), "the generic pipeline's death transition also stops the bridge-owned Sprint");
+    CHECK(r.pipe->stacks_of(song) == 0 && r.pipe->stacks_of(buff) == 0 && r.pipe->stacks_of(persistent) == 1,
+          "death removes nonpersistent effects and retains the effect whose content allows it");
+    CHECK(r.hit_request("Bard_Story_Joy", "Bard_Story_Joy", 5.11) == AbilityPipeline::HitVerdict::NoCast,
+          "death discards the cast's hit-request record");
+    r.run_to(7.0);
+    CHECK(r.health() == 0 && r.mana() == 0 && r.pipe->stacks_of(song) == 0 && r.pipe->stacks_of(buff) == 0,
+          "neither a pending heal nor a song tick restores the dead character's resources");
+    bool closed = false;
+    for (const ZoneSeen& z : zone_events(r))
+        closed = closed || (z.op.kind == bootstrap::ZoneOp::Kind::Close && z.op.ability == r.ability("Bard_Dance_Shielding") &&
+                            z.at <= 5.1 + AbilityPipeline::kZoneCloseDelay);
+    CHECK(closed, "an open zone closes on the normal fade schedule after death");
+    CHECK(cooldowns > 0 && r.pipe->cooldowns_running() == cooldowns && r.pawn.broken.empty(),
+          "death preserves running cooldowns and every cleanup change is valid for the client");
+    r.pipe->set_dead(false);
+    r.run_to(7.1);
+    CHECK(r.pipe->stacks_of(persistent) == 1 && r.pipe->stacks_of(song) == 0,
+          "respawn retains the persistent effect without restarting the old song");
+
+    Rig pending(2, 25);
+    CHECKF(pending.ok(), "the pending-zone rig: %s", pending.problem.c_str());
+    if (!pending.ok()) return;
+    pending.asks = false;
+    pending.know({"Bard_Dance_Shielding"});
+    CHECK(pending.trigger("Bard_Dance_Shielding", 2.0) == Refusal::None, "a zone cast is waiting for its item and cost");
+    CHECK(pending.a7->trigger(content::kGuidRest, 501, 2.0) == Refusal::None, "the bridge-owned Rest effect is also waiting to start");
+    pending.take();
+    pending.run_to(2.1);
+    pending.pipe->set_dead(true);
+    pending.take();
+    pending.run_to(5.0);
+    CHECK(zone_events(pending).empty(), "a zone pending at death never opens");
+    CHECK(!pending.a7->resting() && !pending.a7->rest_effect_on(), "death prevents the bridge-owned pending Rest effect from starting");
+}
+
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--startup-death") {
+        test_held_release_during_startup();
+        test_death_ends_transient_ability_state();
+        std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
+        return g_fail == 0 ? 0 : 1;
+    }
     if (!real_db_present()) {
         std::printf("no content.db at %s (cd services && go run ./cmd/contentc): the generic ability runtime's tests are skipped\n", real_db_path().c_str());
         return 0;
     }
     test_held_ranks();
+    test_held_release_during_startup();
+    test_death_ends_transient_ability_state();
     test_charge_chain();
     test_dance_zones();
     test_catalog();

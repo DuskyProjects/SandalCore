@@ -39,7 +39,7 @@ You need a Windows 10/11 x64 PC with your own installed copy of Ashes of Creatio
 | **CMake** | 3.25 or newer (the copy of Visual Studio works) | the C++ build |
 | **Git** | any current version | fetches CUE4Parse and vcpkg |
 | **[vcpkg](https://github.com/microsoft/vcpkg)** | current | the C++ libraries (grpc, protobuf, openssl, ...); found through `VCPKG_ROOT`, `%USERPROFILE%\vcpkg`, `C:\vcpkg`, `\vcpkg` on the repository's drive, or the Visual Studio copy |
-| **Go** | 1.27 or newer (`services/go.mod`) | the backend services and `contentc` |
+| **Go** | 1.27.2 or newer (`services/go.mod`) | the backend services and `contentc` |
 | **.NET SDK** | 8.0 (any 8.x; with the 8.0 runtime) | `tools/mapc`, which reads the game's files |
 | **Python** | 3.10 or newer | the generators that `extract_game_data.bat` runs |
 | **Docker Desktop** | current | PostgreSQL and NATS, to run the servers (not needed to build); or run PostgreSQL 15+ and NATS yourself |

@@ -9,10 +9,12 @@
 #include <nlohmann/json.hpp>
 
 #include <set>
+#include <regex>
 
 namespace aoc::worldd::abilities {
 
 std::optional<Catalog> Catalog::load(const std::string& path, const stats::StatBundle& bundle, std::string& error) {
+    try {
     auto db = content::AbilityContent::open(path, error);
     if (!db) return std::nullopt;
     // the programs of ab_expr index the expression table of the file's own stat program: any other bundle would run the wrong code
@@ -50,6 +52,23 @@ std::optional<Catalog> Catalog::load(const std::string& path, const stats::StatB
         std::vector<content::EffectHitRow> hits;
         if (!db->effect_hits(g, hits, error)) return std::nullopt;
         for (const content::EffectHitRow& h : hits) d.hits.emplace_back(h.phase, h.hit_guid);
+        const nlohmann::json extra = nlohmann::json::parse(d.row.extra, nullptr, false);
+        if (extra.is_object()) {
+            d.extension_expr = extra.value("ExtensionExpr", int64_t{0});
+            d.extended_maximum = extra.value("ExtendedMaximum", 0.0);
+            if (d.row.name == "Bard_ResonantWeapon" && extra.contains("ResonantWeaponRules")) {
+                for (const auto& r : extra["ResonantWeaponRules"]) {
+                    ResonantWeaponRule rule;
+                    rule.guid = r.value("Guid", int64_t{0});
+                    rule.melody_effect_guid = r.value("MelodyEffectGuid", int64_t{0});
+                    rule.root_hit_guid = r.value("HitGuid", int64_t{0});
+                    rule.targets_bitmask = r.value("TargetsBitmask", 0);
+                    rule.damaging_cost = r.value("DamagingCost", false);
+                    rule.trigger = r.value("AbilityEvents", 0) != 0 ? ResonantWeaponRule::Trigger::AbilityConsumed : ResonantWeaponRule::Trigger::ComboEnd;
+                    c.resonant_weapon_rules_.push_back(rule);
+                }
+            }
+        }
         c.effect_names_[d.row.name] = g;
         c.effects_.emplace(g, std::move(d));
     }
@@ -63,6 +82,32 @@ std::optional<Catalog> Catalog::load(const std::string& path, const stats::StatB
         // what the hit takes off its targets: extra's EffectsToRemoveIds (the effects' guids) and MaxNumEffectsToRemove
         const nlohmann::json extra = nlohmann::json::parse(d.row.extra, nullptr, false);
         if (extra.is_object()) {
+            d.effect_removal_filter = extra.value("EffectRemovalFilter", std::string{});
+            static const std::regex effect_tag_filter(R"filter(^\s*EffectHasTag\(\s*GetEffect\(\)\s*,\s*"([^"]+)"\s*\)\s*$)filter");
+            std::smatch tag_match;
+            if (std::regex_match(d.effect_removal_filter, tag_match, effect_tag_filter)) d.remove_effect_tag = tag_match[1].str();
+            if (extra.contains("RecursiveHits")) {
+                for (const auto& r : extra["RecursiveHits"]) {
+                    RecursiveHitDef recursive;
+                    recursive.hit_guid = r.value("HitGuid", int64_t{0});
+                    recursive.targeting_guid = r.value("TargetingGuid", int64_t{0});
+                    d.recursive_hits.push_back(recursive);
+                    const auto t = r.find("Targeting");
+                    if (t != r.end() && t->is_object()) {
+                        TargetingDef targeting;
+                        targeting.guid = recursive.targeting_guid;
+                        targeting.name = t->value("Name", std::string{});
+                        targeting.radius = t->value("Radius", 0.0);
+                        if (t->contains("Sorting")) {
+                            for (const auto& s : (*t)["Sorting"]) {
+                                targeting.sorting.push_back({s.value("FilterExpr", int64_t{0}), s.value("ScoreExpr", int64_t{0}),
+                                                             s.value("Filter", std::string{}), s.value("Score", std::string{})});
+                            }
+                        }
+                        c.targetings_[targeting.guid] = std::move(targeting);
+                    }
+                }
+            }
             const auto rm = extra.find("EffectsToRemoveIds");
             if (rm != extra.end() && rm->is_array()) {
                 for (const auto& v : *rm) {
@@ -132,6 +177,12 @@ std::optional<Catalog> Catalog::load(const std::string& path, const stats::StatB
         c.ability_names_[d.row.name] = g;
         c.abilities_.emplace(g, std::move(d));
     }
+    if (!db->guids(content::AbilityContent::Table::Projectile, guids, error)) return std::nullopt;
+    for (const int64_t g : guids) {
+        auto row = db->projectile(g, error);
+        if (!row) return std::nullopt;
+        c.projectiles_.emplace(g, std::move(*row));
+    }
     if (!db->guids(content::AbilityContent::Table::Zone, guids, error)) return std::nullopt;
     for (const int64_t g : guids) {
         auto row = db->zone(g, error);
@@ -148,6 +199,12 @@ std::optional<Catalog> Catalog::load(const std::string& path, const stats::StatB
         }
     }
     for (const auto& [g, h] : c.hits_) {
+        for (const RecursiveHitDef& r : h.recursive_hits) {
+            if (!c.hits_.count(r.hit_guid)) {
+                error = "hit " + h.row.name + " names missing recursive hit " + std::to_string(r.hit_guid);
+                return std::nullopt;
+            }
+        }
         for (const content::HitEffectRow& x : h.effects) {
             if (!c.effects_.count(x.effect_guid)) {
                 error = "hit " + h.row.name + " applies effect " + std::to_string(x.effect_guid) + ", which the tables do not have";
@@ -163,7 +220,17 @@ std::optional<Catalog> Catalog::load(const std::string& path, const stats::StatB
             }
         }
     }
+    for (const ResonantWeaponRule& rule : c.resonant_weapon_rules_) {
+        if (!c.hits_.count(rule.root_hit_guid)) {
+            error = "Resonant Weapon names missing reaction hit " + std::to_string(rule.root_hit_guid) + "; rebuild the ability content";
+            return std::nullopt;
+        }
+    }
     return c;
+    } catch (const nlohmann::json::exception& e) {
+        error = std::string("content.db has invalid ability metadata: ") + e.what();
+        return std::nullopt;
+    }
 }
 
 const AbilityDef* Catalog::ability(int64_t guid) const {
@@ -200,6 +267,16 @@ const HitDef* Catalog::hit_named(std::string_view name) const {
 const content::ZoneRow* Catalog::zone(int64_t guid) const {
     const auto it = zones_.find(guid);
     return it == zones_.end() ? nullptr : &it->second;
+}
+
+const content::ProjectileRow* Catalog::projectile(int64_t guid) const {
+    const auto it = projectiles_.find(guid);
+    return it == projectiles_.end() ? nullptr : &it->second;
+}
+
+const TargetingDef* Catalog::targeting(int64_t guid) const {
+    const auto it = targetings_.find(guid);
+    return it == targetings_.end() ? nullptr : &it->second;
 }
 
 const content::ExprRow* Catalog::expr(int64_t id) const {

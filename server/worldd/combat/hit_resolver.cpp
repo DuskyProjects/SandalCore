@@ -72,6 +72,9 @@ bool HitResolver::resolve(Fighter& attacker, Fighter& target, const abilities::H
 bool HitResolver::resolve_with(stats::CharacterStats::Evaluation& attacker, ContextHost& host, const stats::CharacterStats::Evaluation* target, double distance_cm,
                                bool enemy, bool neutral, const abilities::HitDef& hit, const HitMeta& meta, Resolved& out, std::string& why) {
     out = Resolved{};
+    out.hit_guid = hit.row.guid;
+    out.source_type = meta.source_type;
+    out.source_guid = meta.source_guid;
     const EvalView attacker_view(attacker);
     const EvalView target_view(target ? *target : attacker);
     // the target's stats are the actor of the role GetTarget() (a hit on the caster itself: nobody is set, the role reads as the caster)

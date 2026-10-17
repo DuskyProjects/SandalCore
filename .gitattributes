@@ -42,7 +42,7 @@ CMakeLists.txt text
 
 # Regression-gate data (scripts/run_tests.ps1, scripts/e2e_replay.ps1) — compared exactly
 fixtures/e2e/**             -text
-fixtures/test-baseline.txt  -text
+fixtures/test-baseline.txt  -text whitespace=cr-at-eol
 
 # Generated Go code from proto/internal (buf generate)
 services/gen/** linguist-generated=true text eol=lf

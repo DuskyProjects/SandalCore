@@ -453,7 +453,7 @@ static void test_lists_and_mods() {
     CHECK(b.abilities(*cat->class_tree(syn::kClass)) == (std::vector<int64_t>{syn::kAbilityA, syn::kAbilityB, syn::kAbilityC}), "the class tree's abilities in list order: the auto-granted, then the bought");
     // mods: the infinite effect's constant mod, a weapon rank's only with its line in hand
     run(b, {{syn::rE, syn::kClassTree, true}, {syn::rWeaponMod, syn::kWeaponTree, true}});
-    // (plan D2: the passives are effects for the stat engine, one per rank with constant mods; the test flattens them to the mods)
+    // (plan D2: passives include effect-only ranks; flattening here checks just the constant stat mods)
     const auto flat = [](const std::vector<stats::ActiveEffect>& effects) {
         std::vector<stats::EffectMod> out;
         for (const auto& e : effects) out.insert(out.end(), e.mods.begin(), e.mods.end());
@@ -464,8 +464,9 @@ static void test_lists_and_mods() {
     CHECK(none.size() == 1 && none[0].stat == syn::kStatStamina && none[0].value == 7.5 && with_line.size() == 2 && with_line[1].value == 3,
           "mods: the class passive's constant always, a weapon rank's while its line is in hand");
     CHECK(flat(b.passives(syn::kOtherLine)).size() == 1, "...not with another weapon line in hand");
-    CHECK(b.passives(syn::kLine).size() == 2 && b.passives(syn::kLine)[0].stacks == 1 && b.passives(syn::kLine)[0].effect.type_id == stats::kRefTypeEffect,
-          "each is an infinite effect of one stack, referenced as an Effect record");
+    const auto passives = b.passives(syn::kLine);
+    CHECK(passives.size() == 2 && std::all_of(passives.begin(), passives.end(), [](const auto& e) { return e.stacks == 1 && e.effect.type_id == stats::kRefTypeEffect; }),
+          "the permanent passives are retained at one stack; finite grant markers are not permanent engine effects");
     // load: what is stored is filtered by the catalog
     talents::Book l(*cat, syn::kClass, 25);
     size_t dropped = 0;
@@ -1044,12 +1045,40 @@ static void test_action_bar() {
 }
 // Cyb captures, C-O-A code
 
+static void test_effect_only_passives_respect_duration() {
+    auto data = syn::data();
+    constexpr int64_t effect_only = 9000000;
+    for (auto& node : data.trees.front().nodes) {
+        if (node.name != "J_empty_requirement") continue;
+        node.ranks.front().effect = effect_only;
+        node.ranks.front().effect_infinite = true;
+    }
+    std::string error;
+    auto catalog = talents::Catalog::from(std::move(data), error);
+    CHECK(catalog.has_value(), "(the effect-only passive catalog loads)");
+    if (!catalog) return;
+    talents::Book book(*catalog, syn::kClass, 25);
+    book.load(syn::kClassTree, {syn::rJ});
+    book.load(syn::kWeaponTree, {syn::rW});
+    const auto passives = book.passives(syn::kLine);
+    CHECK(passives.size() == 1 && passives.front().effect.guid == effect_only && passives.front().mods.empty() && passives.front().stacks == 1,
+          "an infinite effect-only passive remains present while finite Universal and weapon markers are excluded");
+    const auto ranks = book.held_ranks();
+    CHECK(std::any_of(ranks.begin(), ranks.end(), [](const auto& r) { return r.skill.guid == syn::rW; }) &&
+              std::any_of(ranks.begin(), ranks.end(), [](const auto& r) { return r.skill.guid == syn::rU1; }),
+          "finite marker ranks remain purchased for skill formulas after their effect markers expire");
+    book.load(syn::kWeaponTree, {syn::rWeaponMod});
+    CHECK(book.passives(syn::kLine).size() == 2 && book.passives(syn::kOtherLine).size() == 1,
+          "constant weapon passive mods still require the matching wielded line");
+}
+
 int main() {
     test_catalog_synthetic();
     test_points_and_costs();
     test_gates();
     test_requests();
     test_lists_and_mods();
+    test_effect_only_passives_respect_duration();
     test_slots_synthetic();
     test_known_abilities_synthetic();
     test_real_catalog();

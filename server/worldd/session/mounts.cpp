@@ -96,6 +96,7 @@ double MountController::run_speed(const content::MountRow& row) const {
 MountController::Outcome MountController::summon(const Request& r, double now) {
     // a mount that left the world by itself (a registry removal) is no mount
     if (actor_ != 0 && !registry_.find(actor_)) {
+        if (cast_ != 0) cancel_cast(now, pending_effects_, false);
         steps_.erase(std::remove_if(steps_.begin(), steps_.end(), [](const Step& s) { return s.kind != Kind::CalloutOff; }), steps_.end());
         cast_ = 0;
         forget_mount();
@@ -424,6 +425,7 @@ MountController::Effects MountController::advance(double now) {
     pending_effects_ = {};
     // a mount that left the world by itself: its steps end
     if (actor_ != 0 && !registry_.find(actor_)) {
+        if (cast_ != 0 && !refusal_) cancel_cast(now, out, false);
         steps_.erase(std::remove_if(steps_.begin(), steps_.end(), [](const Step& s) { return s.kind != Kind::CalloutOff && s.kind != Kind::RefusalItem && s.kind != Kind::RefusalEnd; }), steps_.end());
         if (!refusal_) cast_ = 0;
         forget_mount(&out);

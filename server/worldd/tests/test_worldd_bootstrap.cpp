@@ -1068,7 +1068,42 @@ static void test_lingering_actor() {
     CHECK(pb.lingering_count() == 0 && !pb.lingering_open(capture_lingering::kOpens[0].actor.object_id).has_value(), "a closed actor is forgotten");
 }
 
+static void test_effect_instigator_override() {
+    std::printf("CurrentEffects attribution retains the caster of an allied effect\n");
+    const std::array<uint32_t, 4> recipient = {0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u};
+    const std::array<uint32_t, 4> caster = {0xabcdef01u, 0x23456789u, 0xffffffffu, 0x56789abcu};
+    bs::EffectItem effect;
+    effect.effect_id = 17;
+    effect.effect_guid = 23;
+    effect.start_time = 100;
+    effect.duration = 6;
+    effect.tick_time = 1;
+    effect.stacks = 3;
+    const ElementState self = bs::effect_item_state(recipient, effect);
+    effect.instigator_character_guid = caster;
+    const ElementState ally = bs::effect_item_state(recipient, effect);
+    bool default_attribution = true, caster_attribution = true;
+    for (uint16_t word = 0; word < 4; ++word) {
+        for (const uint16_t offset : {uint16_t{7}, uint16_t{11}}) {
+            const auto key = static_cast<uint16_t>(offset + word);
+            const int64_t* own = self.values.at(key).get_if<int64_t>();
+            const int64_t* from = ally.values.at(key).get_if<int64_t>();
+            default_attribution = default_attribution && own && *own == static_cast<int32_t>(recipient[word]);
+            caster_attribution = caster_attribution && from && *from == static_cast<int32_t>(caster[word]);
+        }
+    }
+    CHECK(default_attribution, "without an override, InstigatorGuid and SourceGuid retain the recipient's original words");
+    CHECK(caster_attribution, "an allied effect uses the caster's complete character GUID for both fields, including signed wire words");
+    CHECK(ally.values.size() == self.values.size() && ally.values.size() == 16 &&
+              *ally.values.at(1).get_if<int64_t>() == effect.effect_id && *ally.values.at(2).get_if<int64_t>() == effect.effect_guid &&
+              *ally.values.at(3).get_if<double>() == effect.start_time && *ally.values.at(4).get_if<float>() == effect.duration &&
+              *ally.values.at(5).get_if<float>() == effect.tick_time && *ally.values.at(6).get_if<int64_t>() == effect.stacks &&
+              !*ally.values.at(15).get_if<bool>() && *ally.values.at(16).get_if<int64_t>() == 0,
+          "the override preserves the effect values and all sixteen CurrentEffects commands");
+}
+
 int main() {
+    test_effect_instigator_override();
     test_lingering_actor();
     test_player_controller();
     test_game_state();

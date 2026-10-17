@@ -25,6 +25,8 @@ _deps/
 /third_party/CUE4Parse/
 /tools/mapc/bin/
 /tools/mapc/obj/
+/tools/mapc/tests/bin/
+/tools/mapc/tests/obj/
 
 # ──────────────────────────────────────────────────────────────────────────
 # CMake
@@ -109,6 +111,10 @@ certs/*.bak-*
 # ──────────────────────────────────────────────────────────────────────────
 dump_*.bin
 capture_*.bin
+/src/protocol/tools/captured_pc_spawn_reassembled.bin
+/src/protocol/tools/captured_pkt_104.bin
+/src/protocol/tools/captured_pkt_78.bin
+/src/protocol/tools/captured_pkt_79.bin
 Dumped*.txt
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -91,6 +91,11 @@ static void test_build() {
     wrongp.placements[0].mesh = 5;
     const auto wpb = nav::serialize_geometry(wrongp);
     CHECK(!nav::parse_geometry(wpb.data(), wpb.size(), &g2, &err), "a placement of an unknown mesh is refused");
+    auto excessive = nav::serialize_geometry(nav::Geometry{});
+    const uint32_t placements = 100000000;
+    std::memcpy(excessive.data() + 52, &placements, sizeof placements);
+    CHECK(!nav::parse_geometry(excessive.data(), excessive.size(), &g2, &err) && err.find("counts") != std::string::npos,
+          "a tiny geometry file cannot allocate millions of placements from its header");
 }
 
 static void test_ground() {

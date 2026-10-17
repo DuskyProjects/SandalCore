@@ -61,9 +61,9 @@
 //               Glee's heal every 2 s, the first tick one period after the application when the record ignores the initial one). Every change of
 //               the effect state is run through the stat engine (the same effects, as the character's effect state) and only the stats whose
 //               value changed are sent: Mitigation 0.9652 -> 0.9362 under Glee (x (1 - 0.03)), HealingMult x 1.05, MoveSpeedMult +0.2 under Pep.
-//    class      a Bard that spends Mana gains one stack of Bard_Resonance per cast (30 s, at most 10) [R: every captured Bard cast but Fortissimo's
-//               and the songs', which spend none; the reaction that does it in the game is stored and inert, so this is modelled]; Fortissimo pays
-//               five stacks. The hits' own Resonance applications are left out so a cast never gains two.
+//    class      Resonant Weapon grants one Bard_Resonance stack per non-special Archetype ability (30 s, at most 10); explicit completion hits grant
+//               their additional stack. A weapon-combo finisher executes the active melody's reaction hits, ally targeting, projectiles and stack costs.
+//               Fortissimo spends five stacks and does not generate one. These reactions require the character to hold the passive.
 //    songs      an ability that lists an infinite ticking effect (the Bard's Music_ songs, Berserk, Whirlwind, Protect) is a loop whose effects start
 //               2.3 s on and repeat: stage 2. Stage 1 plays its ability item and its cost and cooldown and nothing else (logged once).
 //    refused    in stage 1 and logged: an ability that needs a target and is applicable to no ally (Mock, Discordance ...), a held ability that is
@@ -118,6 +118,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -254,8 +255,9 @@ public:
     /// `targets`: the actors other than the caster's own that the components name (an NPC's ObjectId), as the session resolved them.
     HitVerdict hit_request(int64_t ability, int64_t targeting_guid, int64_t hit_guid, size_t components, size_t own, double now, const std::vector<uint64_t>& targets = {});
 
-    /// Plan E1, stage 3, part 2: the character died (or came back): a dead character casts nothing (every trigger is refused, Refusal::Dead), the casts waiting
-    /// are dropped, nothing regenerates and the hits that name another actor are not made.
+    /// The character died (or came back): pending casts and hit requests stop,
+    /// nonpersistent effects leave, and open zones fade. Content-marked persistent
+    /// effects and running cooldowns remain; a dead character cannot cast or regenerate.
     void set_dead(bool dead);
     bool dead() const { return dead_; }
 // built with C | O | A and C | Y | B
@@ -283,7 +285,10 @@ public:
 
     /// Gives the caster `stacks` stacks of an effect record with the record's own duration (an item's effect, a GM's, a test's); the change is an
     /// event. False for an effect the catalog does not have.
-    bool grant_effect(int64_t effect_guid, int stacks, double now);
+    bool grant_effect(int64_t effect_guid, int stacks, double now, std::optional<double> duration = std::nullopt);
+    /// A delivered effect keeps the caster's snapshot for its duration, mods and subsequent hits; target reads use this recipient's current stats.
+    bool grant_effect_from(int64_t effect_guid, int stacks, double now, std::optional<double> duration,
+                           std::shared_ptr<const combat::EffectSource> source);
 
     /// Whether the item and cost steps come at the times the retail captures show for the ability (session/ability_timings.h, the default), or all at the
     /// montage's first notify of 300 ms (what the runtime's own tests of its mechanics use).
@@ -291,6 +296,7 @@ public:
 
     /// Takes every instance of an effect record off the caster (a dispel, an item's end); true when there was one.
     bool remove_effect(int64_t effect_guid, double now);
+    bool remove_effects_by_tag(std::string_view tag, int limit, double now);
 
     /// The character moves or stands, as the formulas that ask read it.
     void set_moving(bool moving);
@@ -359,6 +365,7 @@ private:
         double                   last_request = -1e9;
         std::vector<Pending>     due;          // when a request's application runs
         bool                     applied = false;   // the server applied it by itself (no request came by the deadline)
+        bool                     completion_resource_applied = false;
     };
     /// A cast that takes hit requests until its window ends.
     struct CastRecord {
@@ -378,7 +385,7 @@ private:
         int32_t                               client_id = 0;
         const abilities::AbilityDef*          def = nullptr;
         double                                trigger_at = 0;
-        std::optional<double>                 item_due, cost_due, hit_due, projectile_due, loop_due, own_due;
+        std::optional<double>                 item_due, cost_due, hit_due, projectile_due, loop_due, own_due, held_end_due;
         std::vector<const abilities::EffectDef*> own_effects;   // the infinite effects the ability puts on its caster itself (no hit applies them)
         bool                                  toggle_off = false;   // the ability is a loop that is on: this trigger ends it
         int64_t                               chain_owner = 0;      // a chain (Cleric_Mend's five projectiles that fire one hit): the one projectile this cast fires
@@ -409,6 +416,7 @@ private:
         double                      start = 0, end = 0;           // end: infinity for an infinite effect
         double                      next_tick = 0;                // infinity: none
         std::vector<stats::EffectMod> mods;                       // one stack's values
+        std::shared_ptr<const combat::EffectSource> source;       // a foreign caster's retained stat/talent snapshot
     };
     /// A lingering zone the ability spawned with its cast: its actor on the client (the dance's visual effect) and the infinite effects its overlap hits
     /// put on the caster, which end with the dance.
@@ -453,6 +461,8 @@ private:
 
     // evaluation
     bool   eval(int64_t expr, double& out, std::string& why);
+    bool   eval_from(int64_t expr, const std::shared_ptr<const combat::EffectSource>& source, double& out, std::string& why,
+                     const abilities::HitDef* hit = nullptr);
     bool   eval_bool(int64_t expr, bool none, bool& out, std::string& why);
     /// plan E1, stage 3, part 2: an ability's activation requirement for a cast aimed at another actor: the program reads the target's side (IsApplicableTarget,
     /// the distance between the two, the relation) as the hit rules do; with no target named it is eval_bool.
@@ -479,10 +489,11 @@ private:
     std::string montage_group_of(const abilities::AbilityDef& def) const;
 
     // hits and effects
-    void   apply_hit(bootstrap::AbilityChange& c, const abilities::HitDef& hit, double t, bool skip_resource, const HitSource& src);
+    void   apply_hit(bootstrap::AbilityChange& c, const abilities::HitDef& hit, double t, bool skip_resource, const HitSource& src,
+                      const std::shared_ptr<const combat::EffectSource>& source = {});
     /// `raw`: the stacks are the instance's own count whatever the record's stacking says (a grant, not an application of the ability).
     void   apply_effect(bootstrap::AbilityChange& c, const abilities::EffectDef& def, int stacks, std::optional<double> duration, double t, bool raw = false,
-                        int64_t owner = 0);
+                        int64_t owner = 0, const std::shared_ptr<const combat::EffectSource>& source = {});
     void   remove_instance(bootstrap::AbilityChange& c, size_t index);
     void   remove_stacks(bootstrap::AbilityChange& c, int64_t effect_guid, int stacks);
     bootstrap::EffectItem effect_item(const EffectInst& e) const;
@@ -502,14 +513,35 @@ private:
     void   end_loop(bootstrap::AbilityChange& c, int64_t ability, double t);
     /// What the hit takes off its targets (the caster): the effects of EffectsToRemoveIds, at most MaxNumEffectsToRemove of them.
     void   remove_by_hit(bootstrap::AbilityChange& c, const abilities::HitDef& hit);
+    bool   remove_by_tag(bootstrap::AbilityChange& c, std::string_view tag, int limit);
     /// The engine's effect list follows effects_ at once, so that a formula run now reads the effects that were just applied.
     void   sync_engine_effects();
     // hit requests and slots
     CastRecord*  record_of(int32_t client_id);
     void   run_slot(CastRecord& rec, HitSlot& slot, double t, bool response, bool found, const std::vector<uint64_t>& targets);
     /// Plan E1, stage 3: a hit on actors other than the caster (see the header). Appends the confirmation.
-    void   apply_hit_on_targets(bootstrap::AbilityChange& c, const abilities::HitDef& hit, const std::vector<uint64_t>& targets, double t, const HitSource& src,
+    bool   apply_hit_on_targets(bootstrap::AbilityChange& c, const abilities::HitDef& hit, const std::vector<uint64_t>& targets, double t, const HitSource& src,
                                 const abilities::AbilityDef* ability);
+    struct ProcTargets {
+        bool self = false;
+        std::vector<uint64_t> actors;
+    };
+    struct ProcHit {
+        double due = 0;
+        int64_t hit = 0;
+        ProcTargets targets;
+        HitSource source;
+        unsigned depth = 0;
+    };
+    bool   resonant_weapon_enabled() const;
+    void   consume_resonance_ability(bootstrap::AbilityChange& c, const abilities::AbilityDef& def, double t);
+    void   react_resonant_weapon(bootstrap::AbilityChange& c, const abilities::HitDef& hit, const abilities::AbilityDef* ability,
+                                  const std::vector<uint64_t>& targets, double t);
+    ProcTargets select_proc_targets(int64_t targeting, const abilities::HitDef& hit, const ProcTargets& inherited);
+    bool   eval_for_actor(int64_t expr, uint64_t actor, double& out, std::string& why);
+    void   run_proc_hit(bootstrap::AbilityChange& c, const abilities::HitDef& hit, const ProcTargets& targets, double t,
+                         const HitSource& source, unsigned depth = 0);
+    void   run_proc_due(size_t index, double t);
     /// The caster's evaluation, made when it is not (the same one `eval` uses).
     bool   ensure_evaluation(std::string& why);
     double slot_due(const CastRecord& rec, const HitSlot& s) const;
@@ -573,6 +605,8 @@ private:
     int64_t                   next_zone_id_ = 1;
     int64_t                   zone_owner_ = 0;                      // the zone instance whose hits are being applied (the effects they create belong to it)
     std::vector<bootstrap::HitConfirm> confirmations_;             // the hits this step made, attached to its event
+    std::vector<ProcHit>      proc_hits_;
+    bool                      applying_proc_ = false;
     std::deque<CastRecord>    records_;
     std::vector<Held>         held_;
     struct Instance {

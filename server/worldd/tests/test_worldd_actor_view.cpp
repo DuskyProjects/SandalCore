@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -224,8 +225,12 @@ static void test_registry() {
     reg.query(0, 0, 1e12, ids);
     CHECK(ids.size() == reg.size(), "a radius larger than the world walks the grid whole");
     ids.clear();
+    reg.query(0, 0, 1e300, ids);
+    CHECK(ids.size() == reg.size(), "a radius spanning every cell does not overflow the grid size");
+    ids.clear();
     reg.query(std::nan(""), 0, 100, ids);
     reg.query(0, 0, -5, ids);
+    reg.query(0, 0, std::numeric_limits<double>::infinity(), ids);
     CHECK(ids.empty(), "a query with no number in it finds nothing");
 // [C-Y-B :: CoA]
 
@@ -251,6 +256,16 @@ static void test_registry() {
     CHECK(reg.remove(2002) && told == std::vector<uint64_t>({2003}) && !reg.remove(2002), "a listener taken off hears nothing; removing twice is refused");
     reg.off_remove(h2);
     CHECK(reg.count(world::ActorKind::Npc) == 3, "the count by kind");
+
+    world::ActorRegistry edge;
+    CHECK(edge.add(make_npc(3000, 0, 0)) && edge.move(3000, 1e30, 1e30, 0, 0), "an actor can occupy the last grid cell");
+    ids.clear();
+    edge.query(1e30, 1e30, 0, ids);
+    CHECK(ids == std::vector<uint64_t>({3000}), "a query in the last grid cell terminates without wrapping its counters");
+    CHECK(edge.move(3000, -1e30, -1e30, 0, 0), "an actor can occupy the first grid cell");
+    ids.clear();
+    edge.query(-1e30, -1e30, 0, ids);
+    CHECK(ids == std::vector<uint64_t>({3000}), "a query in the first grid cell finds the actor");
 }
 
 // ---- relevancy ------------------------------------------------------------------------------------------

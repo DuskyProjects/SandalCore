@@ -27,6 +27,16 @@ public:
     virtual const CombatData& data() const = 0;
     /// Applies a resolved hit to the target (see CombatWorld::apply_hit_to_npc).
     virtual Delivery deliver(uint64_t target_actor, const Resolved& hit, double now) = 0;
+    virtual bool apply_effect(uint64_t /*target_actor*/, int64_t /*effect_guid*/, int /*stacks*/, std::optional<double> /*duration*/, double /*now*/) { return false; }
+    virtual bool remove_effects_by_tag(uint64_t /*target_actor*/, const std::string& /*tag*/, int /*limit*/, double /*now*/) { return false; }
+    virtual int effect_count(uint64_t target_actor, int64_t effect_guid) {
+        Fighter* f = fighter(target_actor);
+        int count = 0;
+        if (f) for (const auto& e : f->stats().effects()) if (e.effect.guid == effect_guid) count += e.stacks;
+        return count;
+    }
+    /// Alive allied players other than the caster, by centre distance in centimetres.
+    virtual std::vector<uint64_t> nearby_allies(double /*radius_cm*/) { return {}; }
     /// A shield (a TempHealth effect's amount) on the target for `seconds` (0: until it is used up).
     virtual void shield(uint64_t target_actor, double amount, double seconds, double now) = 0;
     /// The target's NetGUID and its HitComp (the collision cylinder) for a confirmation.
@@ -55,17 +65,36 @@ public:
     HitResolver& resolver() override { return world_.resolver(); }
     const CombatData& data() const override { return world_.data(); }
     Delivery deliver(uint64_t target_actor, const Resolved& hit, double now) override {
-        return world_.apply_hit_to_npc(target_actor, self_.id(), hit, world_time(now));
+        return world_.apply_hit(target_actor, self_.id(), hit, world_time(now));
+    }
+    bool apply_effect(uint64_t target_actor, int64_t effect_guid, int stacks, std::optional<double> duration, double now) override {
+        return world_.apply_effect(target_actor, self_.id(), effect_guid, stacks, duration, world_time(now));
+    }
+    int effect_count(uint64_t target_actor, int64_t effect_guid) override { return world_.effect_count(target_actor, effect_guid); }
+    bool remove_effects_by_tag(uint64_t target_actor, const std::string& tag, int limit, double now) override {
+        return world_.remove_effects_by_tag(target_actor, tag, limit, world_time(now));
+    }
+    std::vector<uint64_t> nearby_allies(double radius_cm) override {
+        std::vector<uint64_t> out;
+        if (!std::isfinite(radius_cm) || radius_cm < 0) return out;
+        for (PlayerPort* p : world_.players()) {
+            const Fighter& f = p->fighter();
+            if (f.id() != self_.id() && f.alive() && data().relation(self_.alignments(), f.alignments()) != Relation::Hostile &&
+                distance_cm(self_.position(), f.position()) <= radius_cm) out.push_back(f.id());
+        }
+        return out;
     }
     void shield(uint64_t target_actor, double amount, double seconds, double now) override { world_.add_shield(target_actor, amount, seconds, world_time(now)); }
     /// The world's clock for a time of the runtime's.
     double world_time(double runtime_now) const { return runtime_now + clock_offset_; }
     double clock_offset() const { return clock_offset_; }
     protocol::emit::FIntrepidNetworkGUID guid_of(uint64_t actor) override {
+        if (PlayerPort* p = world_.find_player(actor)) return p->actor_guid();
         const world::WorldActor* a = registry_.find(actor);
         return a ? a->actor.guid : protocol::emit::FIntrepidNetworkGUID{};
     }
     protocol::emit::FIntrepidNetworkGUID hit_component_of(uint64_t actor) override {
+        if (PlayerPort* p = world_.find_player(actor)) return p->hit_component_guid();
         protocol::emit::FIntrepidNetworkGUID g = guid_of(actor);
         g.ObjectId = world_.hit_component_of(actor);
         return g;

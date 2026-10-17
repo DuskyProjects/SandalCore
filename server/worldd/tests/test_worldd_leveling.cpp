@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -157,6 +158,18 @@ static void test_xp(const content::ContentDb& db) {
           "an XP overflow: the level stops at the cap 25, the total just below level 26, and no Universal rank is granted from 21 to 25 (Endurance Training II is at 30)");
     leveling::XpResult r6 = leveling::add_xp(c, universal, r5.after, 1LL << 62);
     CHECK(r6.after == r5.after && !r6.changed() && r6.granted.empty(), "another overflow at the cap changes nothing");
+    const int64_t debt_cap = c.span_of(9);
+    const leveling::Progress debt_progress{9, 300000, 1000};
+    CHECK(leveling::with_death_debt(c, debt_progress) == (leveling::Progress{9, 300000, 4436}),
+          "a death adds two percent of the level's XP span without changing the level or total");
+    CHECK(leveling::with_death_debt(c, leveling::Progress{9, 300000, std::numeric_limits<int64_t>::max()}).debt == debt_cap &&
+              leveling::with_death_debt(c, leveling::Progress{9, 300000, debt_cap - 1}).debt == debt_cap,
+          "death debt saturates at the level's span, including a persisted INT64_MAX debt, without overflowing");
+    CHECK(leveling::with_death_debt(c, debt_progress, 2.0).debt == debt_cap &&
+              leveling::with_death_debt(c, debt_progress, std::numeric_limits<double>::infinity()).debt == debt_cap &&
+              leveling::with_death_debt(c, debt_progress, -1.0).debt == 1000 &&
+              leveling::with_death_debt(c, debt_progress, std::numeric_limits<double>::quiet_NaN()).debt == 1000,
+          "oversized death shares saturate while negative or invalid shares add no debt");
     CHECK(leveling::add_xp(c, universal, p, 0).after == p && leveling::add_xp(c, universal, p, -5).after == p, "zero or negative XP changes nothing");
     // a record whose level is above its XP keeps the level
     leveling::XpResult r7 = leveling::add_xp(c, universal, leveling::Progress{12, 0, 0}, 10);

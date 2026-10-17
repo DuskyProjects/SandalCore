@@ -72,15 +72,35 @@ struct KillReward {
     bool        loot = false;     // there is a corpse the player may loot
 };
 
+/// The caster's stat inputs at effect delivery, retained until the target applies its queued effect.
+struct EffectSource {
+    std::shared_ptr<stats::CharacterStats::Evaluation> evaluation;
+    protocol::emit::FIntrepidNetworkGUID actor;
+    std::array<uint32_t, 4> character_guid{};
+};
+
 /// What the world asks of a player's session.
 class PlayerPort {
 public:
     virtual ~PlayerPort() = default;
     /// The pawn's ObjectId: a player's actor id (ActiveTargets and the confirmations name it).
     virtual uint64_t actor_id() const = 0;
+    virtual protocol::emit::FIntrepidNetworkGUID actor_guid() const { return protocol::emit::FIntrepidNetworkGUID::from_u64(actor_id()); }
+    virtual protocol::emit::FIntrepidNetworkGUID hit_component_guid() const { return {}; }
     virtual Fighter& fighter() = 0;
     /// An NPC's hit on the player: the session applies it (shields first, the confirmation, the replicated arrays).
     virtual void receive_hit(const IncomingHit& hit, double now) = 0;
+    /// Accepts a queued player-targeted hit; bounded session inboxes may refuse it.
+    virtual bool queue_hit(const IncomingHit& hit, double now) { receive_hit(hit, now); return true; }
+    /// A targeted effect, on the world's clock; the player's session applies and replicates it.
+    virtual bool receive_effect(int64_t /*effect_guid*/, int /*stacks*/, std::optional<double> /*duration*/, uint64_t /*instigator*/, double /*now*/) { return false; }
+    virtual bool receive_effect_from(int64_t effect_guid, int stacks, std::optional<double> duration, uint64_t instigator,
+                                     std::shared_ptr<const EffectSource> /*source*/, double now) {
+        return receive_effect(effect_guid, stacks, duration, instigator, now);
+    }
+    virtual bool receive_effect_removal(const std::string& /*tag*/, int /*limit*/, double /*now*/) { return false; }
+    /// A hit of an effect on another actor, confirmed to the effect's instigator.
+    virtual void confirm_hit_on(const IncomingHit& /*hit*/, uint64_t /*target_actor*/, double /*taken*/, bool /*lethal*/, double /*now*/) {}
     /// The player enters or leaves combat (the first exchange, 6 s after the last): the session sets its stats' flag (the out-of-combat regeneration
     /// ends and returns) and its CombatInfo.
     virtual void set_in_combat(bool in_combat, double now) = 0;
@@ -109,6 +129,7 @@ struct Delivery {
     std::vector<double> effective;           // per resolved mod: the part that took effect (a loss is negative; 0 when the target had none to lose)
     bool                lethal = false;
     uint64_t            target_object = 0;   // what the confirmation names as HitComp
+    bool                deferred_confirmation = false; // a player's inbox will confirm the actual deltas when it applies the hit
 };
 
 struct DeathEvent {
@@ -185,6 +206,11 @@ public:
 
     /// Applies a player's resolved hit to an NPC: Health (and Mana) move, the threat, the combat flags, the death. Returns what happened.
     Delivery apply_hit_to_npc(uint64_t npc_actor, uint64_t attacker, const Resolved& resolved, double now);
+    /// The same delivery to a joined player or an NPC.
+    Delivery apply_hit(uint64_t target_actor, uint64_t attacker, const Resolved& resolved, double now);
+    bool apply_effect(uint64_t target_actor, uint64_t instigator, int64_t effect_guid, int stacks, std::optional<double> duration, double now);
+    int effect_count(uint64_t target_actor, int64_t effect_guid);
+    bool remove_effects_by_tag(uint64_t target_actor, const std::string& tag, int limit, double now);
 
     /// Advances the world to `now`: the AI of every combatant near a player, the attacks, the flags, the NPCs' regeneration.
     void tick(double now);
@@ -241,6 +267,11 @@ private:
     void  fill_huntable_stats(const world::WorldActor& a);
     PlayerPort* player(uint64_t actor_id);
     void  player_exchange(uint64_t player_id, double now);
+    void  sync_effects(Npc& n);
+    void  remove_effect(Npc& n, size_t index);
+    void  clear_effects(Npc& n);
+    void  tick_effects(Npc& n, double now);
+    void  shocked_reaction(Npc& n, uint64_t attacker, const Resolved& hit, double now);
 
     world::ActorRegistry&  registry_;
     npc::NpcWorld*         npcs_world_;

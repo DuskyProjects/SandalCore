@@ -243,7 +243,7 @@ std::vector<stats::ActiveEffect> Book::passives(int64_t wielded_line) const {
     for (const Tree* t : listed_trees()) {
         if (t->kind == Kind::Weapon && t->weapon_line != wielded_line) continue;
         for (const RankRef& r : listed(*t)) {
-            if (r.rank->mods.empty()) continue;
+            if (r.rank->mods.empty() && (r.rank->effect == 0 || !r.rank->effect_infinite)) continue;
             stats::ActiveEffect e;
             e.effect = {stats::kRefTypeEffect, r.rank->effect};
             e.stacks = 1;

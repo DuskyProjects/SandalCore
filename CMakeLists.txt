@@ -11,6 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+enable_testing()
 
 # ── Output directory ────────────────────────────────────────────────────────
 set(AOC_DIST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/dist" CACHE PATH
@@ -555,3 +556,29 @@ if(MSVC)
     )
 endif()
 set_target_properties(test_live_server PROPERTIES FOLDER "Tools")
+
+# Register every executable test and describe the current targets to the
+# PowerShell runner. This keeps deleted targets' leftover binaries out of runs.
+function(aoc_register_tests directory)
+    get_property(targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(target IN LISTS targets)
+        get_target_property(type ${target} TYPE)
+        if(target MATCHES "^test_" AND type STREQUAL "EXECUTABLE")
+            add_test(NAME ${target} COMMAND $<TARGET_FILE:${target}>)
+            set_tests_properties(${target} PROPERTIES
+                WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+                TIMEOUT 600)
+            set_property(GLOBAL APPEND_STRING PROPERTY AOC_TEST_MANIFEST
+                "$<TARGET_FILE:${target}>\n")
+        endif()
+    endforeach()
+    get_property(children DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+    foreach(child IN LISTS children)
+        aoc_register_tests("${child}")
+    endforeach()
+endfunction()
+aoc_register_tests("${PROJECT_SOURCE_DIR}")
+set_tests_properties(test_worldd_region_load PROPERTIES LABELS "heavy")
+get_property(test_manifest GLOBAL PROPERTY AOC_TEST_MANIFEST)
+file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/test-targets-$<CONFIG>.txt"
+    CONTENT "${test_manifest}")

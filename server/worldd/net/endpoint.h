@@ -154,6 +154,8 @@ private:
         std::string character_name;
         std::unique_ptr<PlayerSession> player;   // after Join, with EndpointConfig::players
         bool carried_items_differ = false;       // it took over a playing session's inventory and that differs from the record's (plan B2)
+        bool carried_progress_unsaved = false;   // the previous session changed progress; its asynchronous save may not have landed
+        std::optional<svc::Character> carried_character;  // live state retained while a replacement's login is pending
         bool logged_in = false;
         bool closing = false;
         Clock::time_point close_by{};
@@ -171,9 +173,11 @@ private:
     /// The client's Join: builds the player and queues its join sequence (refuses the login when that fails).
     void start_player(Session& s, Clock::time_point now);
     /// Applies a finished login. By value: when the character is already playing on another session, the new session
-    /// starts from where that one is (its last good position goes into the record) and that session's position is
-    /// handed over before the new one can save anything.
+    /// starts from its live position, inventory and progress, and that session's final state is handed over
+    /// before the new one can save anything.
     void on_login_result(Session& s, LoginResult result, Clock::time_point now);
+    /// Overlay only mutable play state, retaining the fresh login's authenticated identity.
+    void carry_character(Session& s, svc::Character& record, const svc::Character& live);
     void remove(const Address& a, const char* why);
     /// Whether the session cap refuses a handshake from `from` (an address with a session is never refused:
     /// its newer Response replaces the session).  Counts the refusal for the log.

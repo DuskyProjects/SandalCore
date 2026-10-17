@@ -124,6 +124,8 @@ type source struct {
 
 // keep lists the record structs the typed tables read.
 var keep = map[string]bool{
+	"ReactionRecordBase":            true,
+	"StatFormulaTypeRecordBase":     true,
 	"StatTypeDefRecordBase":         true,
 	"StatCurveRecordBase":           true,
 	"StatInitializerListRecordBase": true,

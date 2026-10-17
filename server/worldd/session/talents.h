@@ -192,10 +192,8 @@ public:
     std::vector<const Tree*> listed_trees() const;
     /// The abilities of a tree's listed ranks, in list order.
     std::vector<int64_t> abilities(const Tree& tree) const;
-    /// The passives of the ranks that are on the character as effects for the stat engine (plan D2: the one path for every stat mod): one
-    /// effect per rank whose infinite effect has constant stat mods (Endurance Training's MaxStamina +10), from the class tree's, the
-    /// Universal tree's and the professions', and the weapon trees' of the line `wielded_line` (a weapon passive applies only for the weapon
-    /// in hand).
+    /// The permanent passive effects of the ranks that are on the character, including effects with no constant stat mods (Bard_ResonantWeapon's
+    /// reactions query its presence). Finite grant markers are not permanent effects. Existing constant mods are retained; weapon passives require `wielded_line`.
     std::vector<stats::ActiveEffect> passives(int64_t wielded_line) const;
     /// Every skill the character holds, as GetSkillPurchased reads them (the tree and the skill): the listed ranks of every tree it has, the
     /// auto-granted ranks of its level and the bought ones, whichever weapon is in hand.

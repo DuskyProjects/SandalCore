@@ -574,6 +574,10 @@ target_compile_definitions(test_worldd_rewards PRIVATE
 worldd_add_test(test_worldd_ability_pipeline)
 target_compile_definitions(test_worldd_ability_pipeline PRIVATE
     ABILITY_CONTENT_DB_PATH="${PROJECT_SOURCE_DIR}/dist/content/content.db")
+worldd_add_test(test_worldd_resonant_weapon)
+target_compile_definitions(test_worldd_resonant_weapon PRIVATE
+    ABILITY_CONTENT_DB_PATH="${PROJECT_SOURCE_DIR}/dist/content/content.db"
+    NPC_MOTION_PATH="${PROJECT_SOURCE_DIR}/dist/content/npc_motion.tsv")
 worldd_add_test(test_worldd_ability_retail)
 target_compile_definitions(test_worldd_ability_retail PRIVATE
     ABILITY_CONTENT_DB_PATH="${PROJECT_SOURCE_DIR}/dist/content/content.db")

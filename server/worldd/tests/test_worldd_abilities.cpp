@@ -1590,6 +1590,69 @@ static void test_gear_stats(const Rules& r) {
     }
 }
 
+static void test_death_ends_held_abilities(const Rules& r) {
+    std::printf("death ends Sprint and Rest without resetting Dodge's cooldown\n");
+    {
+        Sim s(r.rules);
+        s.move(true);
+        CHECK(s.trigger(content::kGuidSprint, 41) == Refusal::None, "Sprint runs before death");
+        s.run_to(0.1);
+        const double stamina = s.rt.stamina();
+        s.rt.set_dead(true, s.now);
+        s.take();
+        CHECK(!s.rt.sprinting() && s.rt.stat(kMoveSpeedMult) == 1.0 && s.ends() == ints({41}),
+              "death removes Sprint immediately and ends its client instance without an exertion effect");
+        s.run_to(2.0);
+        CHECK(s.rt.stamina() == stamina, "the dead character neither spends nor regenerates Stamina");
+        CHECK(s.trigger(content::kGuidSprint, 42) == Refusal::Dead, "dead characters cannot restart Sprint");
+        s.rt.set_dead(false, s.now);
+        s.run_to(3.0);
+        CHECK(!s.rt.sprinting() && s.rt.stamina() > stamina, "respawn resumes regeneration without restarting Sprint");
+    }
+    {
+        Sim s(r.rules);
+        CHECK(s.trigger(content::kGuidRest, 43) == Refusal::None, "Rest runs before death");
+        s.run_to(2.1);
+        CHECK(s.rt.rest_effect_on() && s.rt.stat(kHealthRegen) > k06, "the Rest regeneration effect is active");
+        s.rt.set_dead(true, s.now);
+        s.take();
+        CHECK(!s.rt.resting() && !s.rt.rest_effect_on() && s.rt.stat(kHealthRegen) == k06 &&
+                  s.rt.stat(kManaRegen) == k06 && s.ends() == ints({43}),
+              "death promptly removes Rest and both regeneration modifiers, ending its client instance");
+        s.run_to(4.0);
+        CHECK(!s.rt.rest_effect_on(), "the ended Rest effect cannot reappear");
+    }
+    {
+        Sim s(r.rules);
+        CHECK(s.trigger(content::kGuidRest, 44) == Refusal::None, "Rest is waiting for its sit-down effect");
+        s.run_to(0.1);
+        s.rt.set_dead(true, s.now);
+        s.take();
+        s.run_to(3.0);
+        CHECK(!s.rt.resting() && !s.rt.rest_effect_on(), "death cancels a Rest effect which has not started");
+    }
+    {
+        Sim s(r.rules);
+        CHECK(s.trigger(content::kGuidDodge, 45) == Refusal::None, "Dodge runs before death");
+        s.run_to(0.1);
+        const double cooldown = s.rt.dodge_cooldown_until();
+        s.rt.set_dead(true, s.now);
+        s.take();
+        CHECK(!s.rt.evading() && s.rt.dodge_cooldown_until() == cooldown && s.ends() == ints({45}),
+              "death ends Evasion and the client instance while preserving Dodge's cooldown");
+        s.rt.set_dead(false, s.now);
+        CHECK(s.trigger(content::kGuidDodge, 46) == Refusal::Cooldown, "respawn cannot bypass the remaining cooldown");
+        const size_t before = s.log.size();
+        s.run_to(0.7);
+        size_t removed_items = 0, removed_cooldowns = 0;
+        for (size_t i = before; i < s.log.size(); ++i) {
+            removed_items += s.log[i].change.abilities_removed.size();
+            removed_cooldowns += s.log[i].change.cooldowns_removed.size();
+        }
+        CHECK(removed_items == 0 && removed_cooldowns == 1, "the cooldown ends without removing the dead ability item a second time");
+    }
+}
+
 int main() {
     const Rules r;
     test_rules(r);
@@ -1602,6 +1665,7 @@ int main() {
     test_rest(r);
     test_other_abilities(r);
     test_mounted(r);
+    test_death_ends_held_abilities(r);
     test_instances(r);
     test_rest_golden();
     test_gear_stats(r);

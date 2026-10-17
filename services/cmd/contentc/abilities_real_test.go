@@ -20,16 +20,15 @@ func TestRealAbilityTables(t *testing.T) {
 		t.Fatal(err)
 	}
 	for table, want := range map[string]int64{
-		// plan E1 stage 3: ability_names.tsv names the 540 NPC abilities too (ab_ability 249 -> 789 with their hits, effects, projectiles and zones),
-		// and ab_expr holds the reward tables' 537 expressions besides the abilities' 1,308 (meta ab.exprs counts the abilities' alone; loot.exprs the rest), and since version 13
-		// the gathering tables' 30 (35 since version 15, whose foliage interactions bring 5 more) (meta gather.exprs): the duration, durability and Quality formulas the data had not yet registered (the Profession rewards' were)
-		"ab_ability": 789, "ab_hit": 1296, "ab_projectile": 195, "ab_zone": 58, "ab_effect": 1145, "ab_expr": 1880,
+		// Version 16 follows recursive hits, Resonant Weapon/Shocked reactions, and the 35 gathering/foliage expressions;
+		// ab.exprs counts ability expressions, loot.exprs the additional reward expressions, gather.exprs the gathering/foliage formulas.
+		"ab_ability": 789, "ab_hit": 1420, "ab_projectile": 204, "ab_zone": 59, "ab_effect": 1161, "ab_expr": 1988,
 	} {
 		if n := scalarInt(t, db, `SELECT count(*) FROM `+table); n != want {
 			t.Errorf("%s has %d rows, want %d", table, n, want)
 		}
 	}
-	for key, want := range map[string]string{"ab.abilities": "789", "ab.hits": "1296", "ab.effects": "1145", "ab.projectiles": "195", "ab.zones": "58", "ab.exprs": "1308", "loot.exprs": "537", "gather.exprs": "35"} {
+	for key, want := range map[string]string{"ab.abilities": "789", "ab.hits": "1420", "ab.effects": "1161", "ab.projectiles": "204", "ab.zones": "59", "ab.exprs": "1417", "loot.exprs": "536", "gather.exprs": "35"} {
 		if meta[key] != want {
 			t.Errorf("meta %s = %q, want %q", key, meta[key], want)
 		}
@@ -72,7 +71,10 @@ func TestRealAbilityTables(t *testing.T) {
 		`SELECT count(*) FROM ab_zone_hit x WHERE NOT EXISTS (SELECT 1 FROM ab_hit h WHERE h.guid = x.hit_guid)`,
 		`SELECT count(*) FROM ab_hit x WHERE NOT EXISTS (SELECT 1 FROM ab_ability_hit a WHERE a.hit_guid = x.guid)
 			AND NOT EXISTS (SELECT 1 FROM ab_effect_hit e WHERE e.hit_guid = x.guid) AND NOT EXISTS (SELECT 1 FROM ab_projectile_hit p WHERE p.hit_guid = x.guid)
-			AND NOT EXISTS (SELECT 1 FROM ab_zone_hit z WHERE z.hit_guid = x.guid)`,
+			AND NOT EXISTS (SELECT 1 FROM ab_zone_hit z WHERE z.hit_guid = x.guid)
+            AND NOT EXISTS (SELECT 1 FROM ab_hit h, json_each(h.extra, '$.RecursiveHits') r WHERE json_extract(r.value, '$.HitGuid') = x.guid)
+            AND NOT EXISTS (SELECT 1 FROM ab_effect e, json_each(e.extra, '$.ResonantWeaponRules') r WHERE json_extract(r.value, '$.HitGuid') = x.guid)
+            AND NOT EXISTS (SELECT 1 FROM ab_effect e, json_each(e.extra, '$.ReactionHits') r WHERE r.value = x.guid)`,
 		`SELECT count(*) FROM ab_cost c WHERE amount_expr <> 0 AND NOT EXISTS (SELECT 1 FROM ab_expr e WHERE e.id = c.amount_expr)`,
 		`SELECT count(*) FROM ab_mod m WHERE value_expr <> 0 AND NOT EXISTS (SELECT 1 FROM ab_expr e WHERE e.id = m.value_expr)`,
 	} {

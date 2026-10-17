@@ -17,6 +17,34 @@ namespace aoc { namespace worldd {
 
 namespace conn = protocol::conn;
 
+namespace {
+
+svc::Character snapshot_player(PlayerSession& player, svc::Character record, const char* why) {
+    const GoodPosition g = player.last_position();
+    player.finish(why);   // persist a mounted rider's mount health before copying the inventory
+    record.has_position = true;
+    record.position = {g.x, g.y, g.z, static_cast<float>(g.yaw_degrees)};
+    record.items = player.inventory().items();
+    const svc::Progress progress = player.progress_snapshot();
+    if (record.class_id != progress.class_id) record.archetype_id = 0;   // resolved from the live class at Join
+    record.level = progress.level;
+    record.class_id = progress.class_id;
+    if (const char* name = bootstrap::client_class_name(progress.class_id)) record.class_name = name;
+    for (const svc::Experience& experience : progress.experience) {
+        const auto row = std::find_if(record.experience.begin(), record.experience.end(), [&](const auto& e) {
+            return e.leveling_type_guid == experience.leveling_type_guid;
+        });
+        if (row == record.experience.end()) record.experience.push_back(experience);
+        else *row = experience;
+    }
+    if (progress.replace_skill_ranks) record.skill_ranks = progress.skill_ranks;
+    if (progress.replace_action_bar) record.action_bar = progress.action_bar;
+    if (!progress.professions.empty()) record.professions = progress.professions;
+    return record;
+}
+
+}  // namespace
+
 Endpoint::Endpoint(EndpointConfig cfg, CookieSigner& signer, LoginQueue& logins, Send send,
                    CookieSigner::RandomFill random, Clock::time_point start)
     : cfg_(std::move(cfg)), signer_(signer), logins_(logins), send_(std::move(send)),
@@ -155,16 +183,28 @@ void Endpoint::on_handshake(const Address& from, const uint8_t* data, size_t len
     bool carried = false;
     uint64_t carried_id = 0;
     std::optional<LoginResult> carried_result;
+    std::optional<svc::Character> carried_character;
+    bool carried_progress_unsaved = false;
+    bool carried_items_differ = false;
     // A worldd without content.db cannot value a character: the login is refused before the ticket is redeemed.
     const bool no_content = cfg_.players && !cfg_.players->ready();
     if (existing != sessions_.end()) {
-        const Session& old = *existing->second;
+        Session& old = *existing->second;
         const auto& result = old.control.login();
         if (!old.closing && old.request.character_id == character_id && old.request.ticket == ticket &&
             (!result || result->accepted)) {
             carried = true;
             carried_id = old.id;
             carried_result = result;
+        }
+        if (!old.closing && old.request.character_id == character_id) {
+            carried_character = old.carried_character;
+            carried_progress_unsaved = old.carried_progress_unsaved;
+            carried_items_differ = old.carried_items_differ;
+            if (old.player && result && result->accepted) {
+                carried_character = snapshot_player(*old.player, result->character, "reconnected");
+                carried_progress_unsaved = carried_progress_unsaved || old.player->progress_changed();
+            }
         }
         remove(from, carried ? "reconnected, keeping its login" : "reconnected");
     }
@@ -184,6 +224,9 @@ void Endpoint::on_handshake(const Address& from, const uint8_t* data, size_t len
     s->deadline = now + cfg_.login_deadline;
     s->request.character_id = character_id;
     s->request.ticket = ticket;
+    s->carried_character = std::move(carried_character);
+    s->carried_progress_unsaved = carried_progress_unsaved;
+    s->carried_items_differ = carried_items_differ;
 
     conn::HandshakePacket a = *p;
     a.type = conn::HandshakeType::Ack;
@@ -221,9 +264,37 @@ void Endpoint::post_login_result(uint64_t session_id, LoginResult result) {
     results_.emplace_back(session_id, std::move(result));
 }
 
+void Endpoint::carry_character(Session& s, svc::Character& record, const svc::Character& live) {
+    std::string unused;
+    const auto record_items = items::Inventory::from_items(record.items, unused);
+    const auto live_items = items::Inventory::from_items(live.items, unused);
+    s.carried_items_differ = s.carried_items_differ || !record_items || !live_items || !(*record_items == *live_items);
+    record.has_position = live.has_position;
+    record.position = live.position;
+    record.items = live.items;
+    record.level = live.level;
+    record.class_id = live.class_id;
+    record.class_name = live.class_name;
+    record.archetype_id = live.archetype_id;
+    const auto adventuring = std::find_if(live.experience.begin(), live.experience.end(), [](const auto& e) {
+        return e.leveling_type_guid == content::kGuidAdventuring;
+    });
+    if (adventuring != live.experience.end()) {
+        const auto row = std::find_if(record.experience.begin(), record.experience.end(), [](const auto& e) {
+            return e.leveling_type_guid == content::kGuidAdventuring;
+        });
+        if (row == record.experience.end()) record.experience.push_back(*adventuring);
+        else *row = *adventuring;
+    }
+    record.skill_ranks = live.skill_ranks;
+    record.action_bar = live.action_bar;
+    if (!live.professions.empty()) record.professions = live.professions;
+}
+
 void Endpoint::on_login_result(Session& s, LoginResult result, Clock::time_point now) {
     if (s.closing) return;  // already kicked or refused
     if (result.accepted) {
+        if (s.carried_character) carry_character(s, result.character, *s.carried_character);
         auto other = by_character_.find(result.character.id);
         if (other != by_character_.end() && !(other->second == s.address)) {
             auto os = sessions_.find(other->second);
@@ -231,25 +302,16 @@ void Endpoint::on_login_result(Session& s, LoginResult result, Clock::time_point
                 spdlog::info("[endpoint] character {} logged in again: dropping {}", result.character.id,
                              other->second.to_string());
                 if (PlayerSession* old = os->second->player.get()) {
-                    // The record in `result` was read when this login began: the old session knows where the character is
-                    // now (its last periodic save may be a minute old, and its end is saved only now). The new session starts
-                    // from that position, and the old one's hand-over goes to the saver now, before anything the new
-                    // session saves.
-                    const GoodPosition g = old->last_position();   // (a rider: beside its mount, on its feet; the mounts milestone, stage 3)
-                    if (g.has_time_stamp) {
-                        result.character.has_position = true;
-                        result.character.position = {g.x, g.y, g.z, static_cast<float>(g.yaw_degrees)};
-                    }
-                    // the same goes for the items (plan B2): the record's are as old as the login's read, the old session's are the character's.
-                    // When they differ from the record's, the old session's final save (handed to the saver below) is all that holds them in the
-                    // database, and the saver may lose it: the new session is told, and saves its inventory when it ends even if the player
-                    // never touches an item.
-                    // (review A M3: the old session ends FIRST: its end persists a mount's Health into its inventory, and the new session must start from that)
-                    old->finish("logged in elsewhere");
-                    std::string unused;
-                    const auto record_items = items::Inventory::from_items(result.character.items, unused);
-                    s.carried_items_differ = !record_items || !(*record_items == old->inventory());
-                    result.character.items = old->inventory().items();
+                    // GetCharacter ran earlier than the old session's final asynchronous save. Carry its complete live play state.
+                    const svc::Character live = snapshot_player(*old, result.character, "logged in elsewhere");
+                    carry_character(s, result.character, live);
+                    s.carried_progress_unsaved = s.carried_progress_unsaved || old->progress_changed();
+                    s.carried_character = result.character;
+                } else if (os->second->carried_character) {
+                    carry_character(s, result.character, *os->second->carried_character);
+                    s.carried_items_differ = s.carried_items_differ || os->second->carried_items_differ;
+                    s.carried_progress_unsaved = s.carried_progress_unsaved || os->second->carried_progress_unsaved;
+                    s.carried_character = result.character;
                 }
                 apply(*os->second, os->second->control.kick(login_text::kLoggedInElsewhere), now);
             }
@@ -297,6 +359,8 @@ void Endpoint::start_player(Session& s, Clock::time_point now) {
     bootstrap::SetupRefusal refusal = bootstrap::SetupRefusal::None;
     s.player = PlayerSession::join(s.connection, *cfg_.players, login->character, identity, seconds(now), error, &refusal);
     if (s.player && s.carried_items_differ) s.player->inventory_may_be_unsaved();
+    if (s.player && s.carried_progress_unsaved) s.player->progress_may_be_unsaved();
+    if (s.player) s.carried_character.reset();
     if (!s.player) {
         spdlog::error("[endpoint] character {} ({}) cannot join the world: {}", s.character_name, s.request.character_id, error);
         // The player's text: the one refusal a player can do something about (pick another character) is named.

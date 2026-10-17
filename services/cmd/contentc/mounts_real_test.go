@@ -211,7 +211,7 @@ func readMountSpeeds(t *testing.T) map[string]map[string]string {
 	if err != nil {
 		t.Skipf("%s: %v (mapc mount-speeds writes it)", path, err)
 	}
-	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	lines := strings.Split(strings.TrimRight(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n"), "\n")
 	header := strings.Split(lines[0], "\t")
 	want := []string{"blueprint", "kind", "parents", "max_walk_speed", "max_run_speed", "max_fly_speed", "max_swim_speed", "defaults"}
 	if strings.Join(header, ",") != strings.Join(want, ",") {
@@ -230,6 +230,24 @@ func readMountSpeeds(t *testing.T) map[string]map[string]string {
 		out[f[0]] = row
 	}
 	return out
+}
+
+func TestReadMountSpeedsLineEndings(t *testing.T) {
+	for _, newline := range []string{"\n", "\r\n"} {
+		t.Run(fmt.Sprintf("%q", newline), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "mount_speeds.tsv")
+			text := "blueprint\tkind\tparents\tmax_walk_speed\tmax_run_speed\tmax_fly_speed\tmax_swim_speed\tdefaults" + newline +
+				"Mount_Test\tGrounded\tBase\t220\t990\t0\t0\ttrue" + newline
+			if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("AOC_MOUNT_SPEEDS", path)
+			rows := readMountSpeeds(t)
+			if got := rows["Mount_Test"]["defaults"]; got != "true" {
+				t.Errorf("defaults = %q, want true", got)
+			}
+		})
+	}
 }
 
 // TestRealMountSpeedsAgreeWithTheItemText holds the item texts' percentages to the Blueprints' own speeds (mapc mount-speeds): a ground mount's speed is its

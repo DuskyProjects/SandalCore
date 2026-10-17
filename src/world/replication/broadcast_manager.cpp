@@ -45,8 +45,8 @@ void BroadcastManager::on_destroy(const events::ActorDestroyed& e) {
     // Remember to emit destroy bunches to whoever had this actor visible.
     pending_destroys_.insert(e.netguid);
     dirty_actors_.erase(e.netguid);
-    // Note: we call visibility_.remove_actor() in tick() AFTER emitting
-    // destroys so we still know who saw it.
+    // Tick removes it through visibility's diff so only clients which
+    // received its spawn are sent a single matching destroy.
 }
 // C_Y_B with C.O.A
 
@@ -79,16 +79,9 @@ void BroadcastManager::tick() {
         pending_destroys_.clear();
     }
 
-    // Step 2: for every known client, compute its visibility diff and emit
-    //        spawn bunches for newly-visible actors.
-    auto clients_at_start = [&]() {
-        // Reuse visibility_.clients_seeing() trick: since no actor may exist,
-        // we need the full client set.  We'll infer it from actors visible
-        // to "any" — but simpler is to just iterate through the per-client
-        // diff lookups.  We do that inside the actors_registry snapshot loop.
-        return std::vector<std::string>{};  // placeholder; real iteration below
-    };
-    (void)clients_at_start;
+    // Remove destroyed actors before draining diffs. This cancels pending
+    // spawns and queues one destroy only for clients already told to spawn.
+    for (uint64_t guid : destroy_snapshot) visibility_.remove_actor(guid);
 
     // A snapshot of actors gives us "look up actor state by netguid" for
     // emitting spawn bunches.
@@ -97,18 +90,8 @@ void BroadcastManager::tick() {
     for (const auto& a : actor_snapshot) actor_lookup[a.netguid] = &a;
 
     // ── Emit spawns for newly-visible actors per client ──
-    // We iterate clients through visibility's API.  Simplest way: for each
-    // client that ever received a diff, drain it.  But we don't track that
-    // top-down.  For MVP we iterate all known actors' clients-seeing set
-    // which recovers the client list.
-    std::unordered_set<std::string> seen_clients;
-    for (const auto& [guid, actor_ptr] : actor_lookup) {
-        for (const auto& c : visibility_.clients_seeing(guid)) {
-            seen_clients.insert(c);
-        }
-    }
-
-    for (const auto& client : seen_clients) {
+    // Clients still need their destroy diff when the last actor disappears.
+    for (const auto& client : visibility_.client_keys()) {
         auto diff = visibility_.drain_diff_for_client(client);
         for (uint64_t guid : diff.newly_visible) {
             auto it = actor_lookup.find(guid);
@@ -148,14 +131,6 @@ void BroadcastManager::tick() {
         }
     }
 
-    // ── Emit destroy bunches then purge from visibility ──
-    for (uint64_t guid : destroy_snapshot) {
-        for (const auto& client : visibility_.clients_seeing(guid)) {
-            emitter_.emit_destroy(client, guid);
-            ++total_emits_;
-        }
-        visibility_.remove_actor(guid);
-    }
 }
 // built by Cyb with C O A
 

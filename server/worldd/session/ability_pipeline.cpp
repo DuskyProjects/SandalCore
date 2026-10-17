@@ -13,6 +13,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <string_view>
@@ -148,14 +149,30 @@ bool is_weapon_combo(const content::AbilityRow& row) {
     return row.name.rfind("WeaponCombo_", 0) == 0;
 }
 
+bool has_tag(const std::vector<std::string>& tags, std::string_view want) {
+    return std::any_of(tags.begin(), tags.end(), [&](const std::string& tag) { return combat::tag_matches(tag, std::string(want)); });
+}
+
+bool has_passive_effect(const stats::CharacterStats& stats, int64_t effect_guid) {
+    for (const stats::ActiveEffect& passive : stats.passives()) {
+        if (passive.effect.guid == effect_guid && passive.stacks > 0) return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 // What a program asks of the host besides the stats: the instigator's effect counts, a seeded random number, nothing of a running ability's
 // progress (songs are stage 2) or of a hit event (the defaults).
 class AbilityPipeline::Host final : public combat::ContextHost {
 public:
-    explicit Host(AbilityPipeline& p) : p_(p) {}
-    double effect_count_by_instigator(const stats::RecordRef& r) override { return p_.stacks_of(r.guid); }
+    explicit Host(AbilityPipeline& p, const combat::EffectSource* source = nullptr) : p_(p), source_(source) {}
+    double effect_count_by_instigator(const stats::RecordRef& r) override {
+        if (!source_ || !source_->evaluation) return p_.stacks_of(r.guid);
+        double stacks = 0;
+        for (const auto& effect : source_->evaluation->inputs().effects) if (effect.effect == r) stacks += effect.stacks;
+        return stacks;
+    }
     double rand_double() override { return p_.rng_.rand_double(); }
     double ability_progress(const std::string& group) override { return p_.progress_of(group); }
 
@@ -163,6 +180,10 @@ protected:
     // the named host functions (statprog's Host... constants) the hit in progress does not answer (combat/hit_context.h does the damage functions, the
     // roles' distance and identity and the hit's own tags and flags): the cast's own state; with only the caster in its world every target is the caster
     double other_fn(int fn, const std::string& name, const double* args, int) override {
+        if (source_ && fn == stats::role_fn(stats::kRoleTarget, stats::kRoleOpEffectRemaining)) {
+            const auto end = p_.effect_end(std::strtoll(name.c_str(), nullptr, 10));
+            return end ? std::max(0.0, *end - p_.clock_) : 0.0;
+        }
         switch (fn) {
             case stats::kHostRemainingCharges: return p_.remaining_charges(std::strtoll(name.c_str(), nullptr, 10));
             case stats::kHostApplicableTarget: {
@@ -189,6 +210,7 @@ protected:
 
 private:
     AbilityPipeline& p_;
+    const combat::EffectSource* source_;
 };
 // -- C-Y-B & C-O-A --
 
@@ -281,6 +303,49 @@ bool AbilityPipeline::ensure_evaluation(std::string& why) {
         why = "the stat engine cannot run: " + err;
         return false;
     }
+    return true;
+}
+
+bool AbilityPipeline::eval_from(int64_t expr, const std::shared_ptr<const combat::EffectSource>& source, double& out, std::string& why,
+                                const HitDef* hit) {
+    if (!source) return eval(expr, out, why);
+    const content::ExprRow* expression = catalog_ ? catalog_->expr(expr) : nullptr;
+    if (!expression || expression->program < 0) {
+        why = expr_problem(expr);
+        return false;
+    }
+    if (!source->evaluation || !source->evaluation->ok()) {
+        why = "the effect's caster snapshot cannot run";
+        return false;
+    }
+    std::string error;
+    auto target = stats_.evaluation(worn_(), error, true);
+    if (!target) { why = error; return false; }
+    auto& caster = *source->evaluation;
+    struct ForgetActors {
+        stats::CharacterStats::Evaluation& evaluation;
+        ~ForgetActors() { evaluation.clear_actors(); }
+    } forget{caster};
+    caster.clear_actors();
+    if (!caster.set_actor(stats::kRoleTarget, *target, error)) { why = error; return false; }
+    const combat::EvalView caster_view(caster), target_view(*target);
+    combat::HitContext context;
+    context.profile = combat_ ? &combat_->data().profile() : nullptr;
+    context.instigator = &caster_view;
+    context.target = &target_view;
+    context.enemy = false;
+    context.neutral = false;
+    context.source_type = content::kSourceTypeEffect;
+    if (hit) {
+        context.tags = hit->tags;
+        const auto aspect = combat::aspect_of(context.tags);
+        context.hit.tag = aspect.element;
+        context.hit.physical = aspect.physical;
+    }
+    Host host(*this, source.get());
+    host.set_context(&context);
+    if (!caster.eval(expression->program, host, out, error)) { why = error; return false; }
+    if (!std::isfinite(out)) { why = "the effect expression is not finite"; return false; }
     return true;
 }
 
@@ -416,12 +481,19 @@ void AbilityPipeline::recompute(AbilityChange& c) {
     }
 }
 
-bool AbilityPipeline::grant_effect(int64_t effect_guid, int stacks, double now) {
+bool AbilityPipeline::grant_effect(int64_t effect_guid, int stacks, double now, std::optional<double> duration) {
+    return grant_effect_from(effect_guid, stacks, now, duration, nullptr);
+}
+
+bool AbilityPipeline::grant_effect_from(int64_t effect_guid, int stacks, double now, std::optional<double> duration,
+                                        std::shared_ptr<const combat::EffectSource> source) {
     const EffectDef* d = catalog_ ? catalog_->effect(effect_guid) : nullptr;
-    if (!d) return false;
+    if (!d || (duration && (!std::isfinite(*duration) || *duration < 0))) return false;
+    if (source && (!source->evaluation || dead_ || stat_now(content::kGuidHealth) <= 0)) return false;
     advance(now);
+    if (source && (dead_ || stat_now(content::kGuidHealth) <= 0)) return false;
     AbilityChange c;
-    apply_effect(c, *d, stacks, std::nullopt, now_, true);
+    apply_effect(c, *d, stacks, duration, now_, true, 0, source);
     recompute(c);
     emit({std::move(c), std::nullopt, now_, "the effect " + d->row.name + " is given"});
     return true;
@@ -506,6 +578,7 @@ void AbilityPipeline::refresh(double now, const char* why, bool with_stats) {
     if (stats_.class_enum() != resource_class_) {
         // the class changed: the old class's effects (its resource, its buffs) leave with it, and the new class's resource is the rule's
         while (!effects_.empty()) remove_instance(c, effects_.size() - 1);
+        proc_hits_.clear();
         resolve_resource();
     }
     if (with_stats) {
@@ -543,11 +616,19 @@ bootstrap::EffectItem AbilityPipeline::effect_item(const EffectInst& e) const {
     item.duration = std::isinf(e.end) ? AbilityRuntime::kInfiniteDuration : static_cast<float>(e.end - e.start);
     item.tick_time = static_cast<float>(e.def->row.tick_timer);
     item.stacks = e.stacks;
+    if (e.source && e.source->character_guid != std::array<uint32_t, 4>{}) item.instigator_character_guid = e.source->character_guid;
     return item;
 }
 
-void AbilityPipeline::apply_effect(AbilityChange& c, const EffectDef& def, int stacks_in, std::optional<double> duration, double t, bool raw, int64_t owner) {
+void AbilityPipeline::apply_effect(AbilityChange& c, const EffectDef& def, int stacks_in, std::optional<double> duration, double t, bool raw, int64_t owner,
+                                    const std::shared_ptr<const combat::EffectSource>& source) {
     const content::EffectRow& row = def.row;
+    const auto evaluate = [&](int64_t expression, double& value, std::string& why) { return eval_from(expression, source, value, why); };
+    if (source && row.requirement_expr != 0) {
+        double allowed = 0;
+        std::string why;
+        if (!evaluate(row.requirement_expr, allowed, why) || allowed == 0) return;
+    }
     if (stacks_in < 1) stacks_in = 1;
     // the duration: the hit row's, the record's (a number of seconds), or none: infinite
     double dur = kInf;
@@ -555,7 +636,7 @@ void AbilityPipeline::apply_effect(AbilityChange& c, const EffectDef& def, int s
         dur = *duration;
     } else if (!row.infinite_duration && row.duration_expr != 0) {
         std::string why;
-        if (!eval(row.duration_expr, dur, why)) {
+        if (!evaluate(row.duration_expr, dur, why)) {
             AbilityEvent e;
             e.at = t;
             e.note = "the effect " + row.name + " is not applied: its duration does not run (" + why + ")";
@@ -572,7 +653,7 @@ void AbilityPipeline::apply_effect(AbilityChange& c, const EffectDef& def, int s
         if (m.shield_absorb || m.value_expr == 0) continue;
         double v = 0;
         std::string why;
-        if (!eval(m.value_expr, v, why)) continue;   // a mod that does not run is left out (the engine's none)
+        if (!evaluate(m.value_expr, v, why)) continue;   // a mod that does not run is left out (the engine's none)
         if (m.stat_guid == content::kGuidTempHealth) {
             if (std::isfinite(v) && v > 0) shield = static_cast<float>(shield.value_or(0.0f) + v);
             continue;
@@ -588,7 +669,7 @@ void AbilityPipeline::apply_effect(AbilityChange& c, const EffectDef& def, int s
         if (row.in_place_stack_limit_expr != 0) {
             double v = 0;
             std::string why;
-            if (eval(row.in_place_stack_limit_expr, v, why) && v >= 1) return static_cast<int>(std::min(v, 4096.0));
+            if (evaluate(row.in_place_stack_limit_expr, v, why) && v >= 1) return static_cast<int>(std::min(v, 4096.0));
         }
         return std::max(1, row.global_stack_limit);
     }();
@@ -608,9 +689,16 @@ void AbilityPipeline::apply_effect(AbilityChange& c, const EffectDef& def, int s
     }
     auto refreshed = [&](EffectInst& e) {   // the refresh rule of the record on an instance that is applied again
         if (never_refresh) return;
+        e.source = source;
         give_shield(e);   // a shield that is applied again is given in full again
         double total = dur;
-        if (extend && !std::isinf(e.end) && !std::isinf(dur)) total = (e.end - t) + dur;   // the remaining time plus the full one
+        if (extend && !std::isinf(e.end) && !std::isinf(dur)) {
+            double extension = dur;
+            std::string why;
+            if (def.extension_expr != 0 && !evaluate(def.extension_expr, extension, why)) extension = dur;
+            total = std::max(0.0, e.end - t) + std::max(0.0, extension);
+            if (def.extended_maximum > 0) total = std::min(total, static_cast<double>(def.extended_maximum));
+        }
         e.start = t;
         e.end = std::isinf(total) ? kInf : t + total;
     };
@@ -618,6 +706,7 @@ void AbilityPipeline::apply_effect(AbilityChange& c, const EffectDef& def, int s
         EffectInst e;
         e.key = a7_.allocate_effect_id();
         e.def = &def;
+        e.source = source;
         e.owner = owner;
         e.zone = zone_owner_;
         e.stacks = stacks;
@@ -724,6 +813,34 @@ void AbilityPipeline::remove_by_hit(AbilityChange& c, const HitDef& hit) {
     }
     sync_engine_effects();
 }
+
+bool AbilityPipeline::remove_by_tag(AbilityChange& c, std::string_view tag, int limit) {
+    if (tag.empty() || limit <= 0) return false;
+    bool any = false;
+    for (size_t i = 0; i < effects_.size() && limit > 0;) {
+        const content::EffectRow& row = effects_[i].def->row;
+        if (!has_tag(row.tags, tag) && !has_tag(row.effect_tags, tag)) {
+            ++i;
+            continue;
+        }
+        remove_instance(c, i);
+        --limit;
+        any = true;
+    }
+    sync_engine_effects();
+    return any;
+}
+
+bool AbilityPipeline::remove_effects_by_tag(std::string_view tag, int limit, double now) {
+    advance(now);
+    AbilityChange c;
+    const bool any = remove_by_tag(c, tag, limit);
+    if (any) {
+        recompute(c);
+        emit({std::move(c), std::nullopt, now_, "tagged effects are dispelled"});
+    }
+    return any;
+}
 // C:Y:B with C-O-A
 
 void AbilityPipeline::run_effect_hits(AbilityChange& c, const EffectInst& e, const char* const* phases, size_t n, double t) {
@@ -740,7 +857,7 @@ void AbilityPipeline::run_effect_hits(AbilityChange& c, const EffectInst& e, con
         bool wanted = false;
         for (size_t i = 0; i < n; ++i) wanted = wanted || phase == phases[i];
         if (!wanted) continue;
-        if (const HitDef* h = catalog_->hit(hit_guid)) apply_hit(c, *h, t, false, src);
+        if (const HitDef* h = catalog_->hit(hit_guid)) apply_hit(c, *h, t, false, src, e.source);
     }
 }
 
@@ -825,13 +942,13 @@ double AbilityPipeline::take_damage(double amount, double now) {
     return through;
 }
 
-void AbilityPipeline::apply_hit_on_targets(AbilityChange& c, const HitDef& hit, const std::vector<uint64_t>& targets, double t, const HitSource& src,
+bool AbilityPipeline::apply_hit_on_targets(AbilityChange& c, const HitDef& hit, const std::vector<uint64_t>& targets, double t, const HitSource& src,
                                            const AbilityDef* ability) {
-    if (!combat_ || targets.empty()) return;
+    if (!combat_ || targets.empty()) return false;
     std::string why;
     bool ok = true;
-    if (!eval_bool(hit.row.requirement_expr, true, ok, why) || !ok) return;
-    if (!ensure_evaluation(why)) return;
+    if (!eval_bool(hit.row.requirement_expr, true, ok, why) || !ok) return false;
+    if (!ensure_evaluation(why)) return false;
     const int mask = hit.row.applicable_targets;
     double max_targets = 40;
     if (hit.row.max_targets_expr != 0) {
@@ -841,8 +958,9 @@ void AbilityPipeline::apply_hit_on_targets(AbilityChange& c, const HitDef& hit, 
     const bool melee = ability && (ability->row.name.rfind("WeaponCombo_Melee", 0) == 0 ||
                                    std::find(ability->row.tags.begin(), ability->row.tags.end(), "ability.Melee") != ability->row.tags.end());
     std::vector<bootstrap::HitTargetOut> outs;
+    std::vector<uint64_t> delivered_targets;
     for (const uint64_t id : targets) {
-        if (static_cast<double>(outs.size()) >= max_targets) break;
+        if (static_cast<double>(delivered_targets.size()) >= max_targets) break;
         const combat::TargetInfo ti = combat_->inspect(id);
         if (!ti.exists || !ti.alive) continue;
         const bool hostile = ti.relation == combat::Relation::Hostile;
@@ -866,6 +984,7 @@ void AbilityPipeline::apply_hit_on_targets(AbilityChange& c, const HitDef& hit, 
         }
         const combat::Delivery d = combat_->deliver(id, r, t);
         if (!d.applied) continue;
+        delivered_targets.push_back(id);
         bootstrap::HitTargetOut out;
         out.component = combat_->guid_of(id);          // the HitComp is the target actor [R: research/hitfx 1]
         out.cylinder = combat_->hit_component_of(id);  // exported with the confirmation when the client has no GUID for it yet
@@ -882,14 +1001,32 @@ void AbilityPipeline::apply_hit_on_targets(AbilityChange& c, const HitDef& hit, 
         }
         out.flags = d.flags;
         for (size_t i = 0; i < r.mods.size(); ++i) {
+            if (i >= d.effective.size()) continue;   // a queued allied hit is confirmed by its recipient after application
             // a stat mod whose value is 0 is not on the wire [R: the book's Weapon_Book_Hit_n, whose mod is the data's "0", carries no StatMod in
             // 408 of 408 retail confirmations; a heal at full Health keeps its Value with EffectiveValue 0]
             if (r.mods[i].value == 0.0 && d.effective[i] == 0.0) continue;
             out.mods.push_back({r.mods[i].stat_mod_guid, static_cast<float>(r.mods[i].value), static_cast<float>(d.effective[i])});
         }
-        outs.push_back(std::move(out));
+        if (!d.deferred_confirmation) outs.push_back(std::move(out));
+        if (applying_proc_ && !r.miss()) {
+            if (!hit.remove_effect_tag.empty()) combat_->remove_effects_by_tag(id, hit.remove_effect_tag, hit.max_remove, t);
+            for (const content::HitEffectRow& row : hit.effects) {
+                if (row.kind == "self") continue;
+                double applies = 1;
+                if (row.requirement_expr != 0 && (!eval_for_actor(row.requirement_expr, id, applies, why) || applies == 0)) continue;
+                double stacks = 1;
+                if (row.stack_count_expr != 0 && !eval(row.stack_count_expr, stacks, why)) continue;
+                std::optional<double> duration;
+                if (row.duration_expr != 0) {
+                    double seconds = 0;
+                    if (!eval(row.duration_expr, seconds, why)) continue;
+                    duration = std::max(0.0, seconds);
+                }
+                combat_->apply_effect(id, row.effect_guid, static_cast<int>(std::clamp(stacks, 1.0, 4096.0)), duration, t);
+            }
+        }
         // what the hit applies to its target: a shield goes to the target (an effect's other mods are the NPC world's to take, part 2)
-        if (!r.miss()) {
+        if (!applying_proc_ && !r.miss()) {
             for (const content::HitEffectRow& row : hit.effects) {
                 if (row.kind == "self") continue;
                 const EffectDef* def = catalog_->effect(row.effect_guid);
@@ -909,7 +1046,7 @@ void AbilityPipeline::apply_hit_on_targets(AbilityChange& c, const HitDef& hit, 
         }
     }
     // what the hit applies to its caster ("self" rows) comes with the hit once, if it found anyone
-    if (!outs.empty()) {
+    if (!delivered_targets.empty()) {
         for (const content::HitEffectRow& row : hit.effects) {
             if (row.kind != "self") continue;
             bool applies = true;
@@ -928,7 +1065,6 @@ void AbilityPipeline::apply_hit_on_targets(AbilityChange& c, const HitDef& hit, 
         }
     }
     drop_evaluation();
-    if (outs.empty()) return;
     const auto confirm = [&](std::vector<bootstrap::HitTargetOut> targets, std::optional<protocol::emit::FIntrepidNetworkGUID> source) {
         bootstrap::HitConfirm h;
         h.record_guid = hit.row.guid;
@@ -942,22 +1078,25 @@ void AbilityPipeline::apply_hit_on_targets(AbilityChange& c, const HitDef& hit, 
         h.response = src.response;
         confirmations_.push_back(std::move(h));
     };
-    if (!src.source_is_target) {
+    if (!outs.empty() && !src.source_is_target) {
         confirm(std::move(outs), std::nullopt);
-        return;
+    } else {
+        // A hit fired where a projectile landed names that target actor as its Source.
+        for (bootstrap::HitTargetOut& o : outs) {
+            std::vector<bootstrap::HitTargetOut> one;
+            const protocol::emit::FIntrepidNetworkGUID actor = o.component;
+            one.push_back(std::move(o));
+            confirm(std::move(one), actor);
+        }
     }
-    // E1 stage 3 fix 3: a hit fired where a projectile landed names that target actor as its Source (the origin the client spawns the next projectile
-    // from), one confirmation per target [R: the book's Split hits, 1,289 of 1,289: Source = the target, one target each]
-    for (bootstrap::HitTargetOut& o : outs) {
-        std::vector<bootstrap::HitTargetOut> one;
-        const protocol::emit::FIntrepidNetworkGUID actor = o.component;
-        one.push_back(std::move(o));
-        confirm(std::move(one), actor);
-    }
+    react_resonant_weapon(c, hit, ability, delivered_targets, t);
+    return !delivered_targets.empty();
 }
 
 void AbilityPipeline::receive_hit(const combat::IncomingHit& in, double now) {
+    if (dead_ || stat_now(content::kGuidHealth) <= 0) return;
     advance(now);
+    if (dead_ || stat_now(content::kGuidHealth) <= 0) return;
     AbilityChange c;
     bootstrap::HitConfirm h;
     h.record_guid = in.hit_guid;
@@ -1018,26 +1157,31 @@ void AbilityPipeline::confirm_hit_on(const combat::IncomingHit& in, double now, 
 }
 // -- C O A & Cyb --
 
-void AbilityPipeline::apply_hit(AbilityChange& c, const HitDef& hit, double t, bool skip_resource, const HitSource& src) {
+void AbilityPipeline::apply_hit(AbilityChange& c, const HitDef& hit, double t, bool skip_resource, const HitSource& src,
+                                 const std::shared_ptr<const combat::EffectSource>& source) {
     if (!hits_caster(hit.row)) return;
-    bool ok = true;
     std::string why;
-    if (!eval_bool(hit.row.requirement_expr, true, ok, why) || !ok) return;
+    const auto evaluate = [&](int64_t expression, double& value, std::string& problem) { return eval_from(expression, source, value, problem, &hit); };
+    const auto allowed = [&](int64_t expression) {
+        double value = 1;
+        return expression == 0 || (evaluate(expression, value, why) && value != 0);
+    };
+    if (!allowed(hit.row.requirement_expr)) return;
+    if (applying_proc_ && !hit.remove_effect_tag.empty()) remove_by_tag(c, hit.remove_effect_tag, hit.max_remove);
     if (!hit.remove_effects.empty()) remove_by_hit(c, hit);   // (what the hit takes off goes before what it applies)
     for (const content::HitEffectRow& row : hit.effects) {
-        bool applies = true;
-        if (!eval_bool(row.requirement_expr, true, applies, why) || !applies) continue;
+        if (!allowed(row.requirement_expr)) continue;
         const EffectDef* def = catalog_->effect(row.effect_guid);
         if (!def) continue;
-        if (skip_resource && resource_ && def == resource_) continue;   // the class rule gains the resource: a cast never gains two
+        if (skip_resource && resource_ && def == resource_ && !resonant_weapon_enabled()) continue;
         double stacks = 1;
-        if (row.stack_count_expr != 0 && !eval(row.stack_count_expr, stacks, why)) stacks = 1;
+        if (row.stack_count_expr != 0 && !evaluate(row.stack_count_expr, stacks, why)) stacks = 1;
         std::optional<double> duration;
         if (row.duration_expr != 0) {
             double d = 0;
-            if (eval(row.duration_expr, d, why)) duration = std::max(0.0, d);
+            if (evaluate(row.duration_expr, d, why)) duration = std::max(0.0, d);
         }
-        apply_effect(c, *def, static_cast<int>(std::clamp(stacks, 1.0, 4096.0)), duration, t);
+        apply_effect(c, *def, static_cast<int>(std::clamp(stacks, 1.0, 4096.0)), duration, t, false, 0, source);
         sync_engine_effects();   // the character's effects changed: the next value is read against them
     }
     // the hit's own stat mods: the formula's value moves the stat at once (a heal clamped at the maximum, a loss through the shields); the
@@ -1046,7 +1190,7 @@ void AbilityPipeline::apply_hit(AbilityChange& c, const HitDef& hit, double t, b
     for (const content::ModRow& m : hit.mods) {
         if (m.shield_absorb || m.value_expr == 0) continue;
         double amount = 0;
-        if (!eval(m.value_expr, amount, why) || !std::isfinite(amount)) continue;
+        if (!evaluate(m.value_expr, amount, why) || !std::isfinite(amount)) continue;
         const double effective = apply_delta(c, m.stat_guid, amount);
         outs.push_back({m.stat_mod_guid, static_cast<float>(amount), static_cast<float>(effective)});
     }
@@ -1064,7 +1208,214 @@ void AbilityPipeline::apply_hit(AbilityChange& c, const HitDef& hit, double t, b
         h.predicted_autonomous = src.autonomous;
         h.predicted_simulated = src.simulated;
         h.response = src.response;
+        if (source) {
+            h.instigator = source->actor;
+            if (src.actor) h.source = source->actor;
+        }
         confirmations_.push_back(std::move(h));
+    }
+}
+
+bool AbilityPipeline::resonant_weapon_enabled() const {
+    const EffectDef* passive = catalog_ ? catalog_->effect_named("Bard_ResonantWeapon") : nullptr;
+    return resource_ && passive && has_passive_effect(stats_, passive->row.guid);
+}
+
+void AbilityPipeline::consume_resonance_ability(AbilityChange& c, const AbilityDef& def, double t) {
+    if (!resonant_weapon_enabled() || !has_tag(def.row.tags, "ability.Archetype") || has_tag(def.row.tags, "ability.special")) return;
+    for (const abilities::ResonantWeaponRule& rule : catalog_->resonant_weapon_rules()) {
+        if (rule.trigger != abilities::ResonantWeaponRule::Trigger::AbilityConsumed) continue;
+        if (const HitDef* hit = catalog_->hit(rule.root_hit_guid)) {
+            HitSource src;
+            src.type = content::kSourceTypeEffect;
+            src.guid = catalog_->effect_named("Bard_ResonantWeapon")->row.guid;
+            src.confirm = true;
+            src.autonomous = false;
+            run_proc_hit(c, *hit, {true, {}}, t, src);
+            return;
+        }
+    }
+    // Older content files contain the stack effect but not its reaction closure.
+    apply_effect(c, *resource_, 1, std::nullopt, t);
+}
+
+bool AbilityPipeline::eval_for_actor(int64_t expr, uint64_t actor, double& out, std::string& why) {
+    if (actor == 0 || !combat_) {
+        const content::ExprRow* expression = catalog_ ? catalog_->expr(expr) : nullptr;
+        if (!expression || expression->program < 0) return false;
+        auto live = stats_.evaluation(worn_(), why, true);
+        if (!live) return false;
+        Host host(*this);
+        return live->eval(expression->program, host, out, why) && std::isfinite(out);
+    }
+    const content::ExprRow* e = catalog_ ? catalog_->expr(expr) : nullptr;
+    const combat::TargetInfo ti = combat_->inspect(actor);
+    combat::Fighter* target = ti.exists ? combat_->fighter(actor) : nullptr;
+    if (!e || e->program < 0 || !target || !ensure_evaluation(why)) return false;
+    std::string err;
+    auto target_eval = target->stats().evaluation(target->worn(), err, true);
+    if (!target_eval) return false;
+    if (!evaluation_->set_actor(stats::kRoleTarget, *target_eval, err)) return false;
+    struct ForgetActor {
+        stats::CharacterStats::Evaluation& evaluation;
+        ~ForgetActor() { evaluation.clear_actors(); }
+    } forget_actor{*evaluation_};
+    const combat::EvalView self_view(*evaluation_), target_view(*target_eval);
+    combat::HitContext ctx;
+    ctx.instigator = &self_view;
+    ctx.target = &target_view;
+    ctx.distance_cm = combat::distance_cm(combat_->self().position(), ti.position);
+    ctx.enemy = ti.relation == combat::Relation::Hostile;
+    ctx.neutral = ti.relation == combat::Relation::Neutral;
+    Host host(*this);
+    host.set_context(&ctx);
+    return evaluation_->eval(e->program, host, out, err) && std::isfinite(out);
+}
+
+AbilityPipeline::ProcTargets AbilityPipeline::select_proc_targets(int64_t targeting_guid, const HitDef& hit, const ProcTargets& inherited) {
+    const abilities::TargetingDef* targeting = catalog_->targeting(targeting_guid);
+    if (!targeting) return inherited;
+    if (targeting->name == "Default_Self") return {true, {}};
+    if (!(targeting->radius > 0)) return inherited;
+    struct Candidate { uint64_t actor; std::vector<double> scores; };
+    std::vector<uint64_t> candidates;
+    if (hits_caster(hit.row)) candidates.push_back(0);
+    if (combat_ && (hit.row.applicable_targets & (4 | 8 | 16)) != 0) {
+        const std::vector<uint64_t> allies = combat_->nearby_allies(targeting->radius);
+        candidates.insert(candidates.end(), allies.begin(), allies.end());
+    }
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+    std::vector<Candidate> ranked;
+    std::string why;
+    for (const uint64_t actor : candidates) {
+        if (actor != 0 && combat_) {
+            const combat::TargetInfo info = combat_->inspect(actor);
+            if (!info.exists || !info.alive || !info.in_line_of_sight) continue;
+        }
+        Candidate candidate{actor, {}};
+        bool eligible = true;
+        for (const auto& sorting : targeting->sorting) {
+            double value = 1;
+            if (sorting.filter_expr != 0 && (!eval_for_actor(sorting.filter_expr, actor, value, why) || value == 0)) {
+                eligible = false;
+                break;
+            }
+            value = 0;
+            if (sorting.score_expr != 0 && !eval_for_actor(sorting.score_expr, actor, value, why)) {
+                eligible = false;
+                break;
+            }
+            candidate.scores.push_back(value);
+        }
+        if (eligible) ranked.push_back(std::move(candidate));
+    }
+    std::stable_sort(ranked.begin(), ranked.end(), [](const Candidate& a, const Candidate& b) { return a.scores > b.scores; });
+    double maximum = 40;
+    if (hit.row.max_targets_expr != 0) {
+        double v = 0;
+        if (!eval(hit.row.max_targets_expr, v, why) || v < 1) return {};
+        maximum = std::min(maximum, v);
+    }
+    ProcTargets out;
+    for (size_t i = 0; i < ranked.size() && static_cast<double>(i) < maximum; ++i) {
+        if (ranked[i].actor == 0) out.self = true;
+        else out.actors.push_back(ranked[i].actor);
+    }
+    return out;
+}
+
+void AbilityPipeline::run_proc_hit(AbilityChange& c, const HitDef& hit, const ProcTargets& targets, double t, const HitSource& src, unsigned depth) {
+    if (depth >= 16 || (!targets.self && targets.actors.empty())) return;
+    const bool previous = applying_proc_;
+    applying_proc_ = true;
+    const bool resource_cost = resource_ && hit.row.name.rfind("Bard_ResonantWeapon_Cost", 0) == 0 &&
+        std::find(hit.remove_effects.begin(), hit.remove_effects.end(), resource_->row.guid) != hit.remove_effects.end();
+    bool reached = targets.self && hits_caster(hit.row);
+    if (targets.self) {
+        if (resource_cost) {
+            remove_stacks(c, resource_->row.guid, std::max(1, hit.max_remove));
+            sync_engine_effects();
+        }
+        else apply_hit(c, hit, t, false, src);
+    }
+    if (!targets.actors.empty()) reached = apply_hit_on_targets(c, hit, targets.actors, t, src, nullptr) || reached;
+    if (!reached) {
+        applying_proc_ = previous;
+        return;
+    }
+    for (const abilities::RecursiveHitDef& recursive : hit.recursive_hits) {
+        const HitDef* child = catalog_->hit(recursive.hit_guid);
+        if (!child) continue;
+        run_proc_hit(c, *child, select_proc_targets(recursive.targeting_guid, *child, targets), t, src, depth + 1);
+    }
+    for (const int64_t projectile_guid : hit.fires) {
+        const content::ProjectileRow* projectile = catalog_->projectile(projectile_guid);
+        if (!projectile) continue;
+        const auto schedule = [&](const ProcTargets& recipient, double distance) {
+            double delay = projectile->speed > 0 ? distance / projectile->speed : kProjectileDelay;
+            if (!std::isfinite(delay) || delay < 0 || (projectile->range > 0 && distance > projectile->range) ||
+                (projectile->life_time > 0 && delay > projectile->life_time)) return;
+            HitSource projectile_source;
+            projectile_source.type = content::kSourceTypeProjectile;
+            projectile_source.guid = projectile_guid;
+            projectile_source.actor = false;
+            projectile_source.confirm = true;
+            projectile_source.autonomous = false;
+            for (const int64_t child : projectile->hits) {
+                if (proc_hits_.size() >= 512) break;
+                proc_hits_.push_back({t + delay, child, recipient, projectile_source, depth + 1});
+            }
+        };
+        if (targets.self) schedule({true, {}}, 0);
+        for (const uint64_t actor : targets.actors) {
+            if (!combat_) break;
+            const combat::TargetInfo ti = combat_->inspect(actor);
+            if (ti.exists && ti.alive) schedule({false, {actor}}, combat::distance_cm(combat_->self().position(), ti.position));
+        }
+    }
+    applying_proc_ = previous;
+}
+
+void AbilityPipeline::run_proc_due(size_t index, double t) {
+    const ProcHit pending = proc_hits_[index];
+    proc_hits_.erase(proc_hits_.begin() + static_cast<std::ptrdiff_t>(index));
+    const HitDef* hit = catalog_ ? catalog_->hit(pending.hit) : nullptr;
+    if (!hit || dead_) return;
+    AbilityChange c;
+    run_proc_hit(c, *hit, pending.targets, t, pending.source, pending.depth);
+    recompute(c);
+    emit({std::move(c), std::nullopt, t, "a Resonant Weapon projectile lands"});
+}
+
+void AbilityPipeline::react_resonant_weapon(AbilityChange& c, const HitDef& hit, const AbilityDef* ability, const std::vector<uint64_t>& targets, double t) {
+    if (applying_proc_ || targets.empty() || !resonant_weapon_enabled() || stacks_of(resource_->row.guid) <= 0) return;
+    const bool weapon = has_tag(hit.tags, "ability.weaponcombo") || (ability && has_tag(ability->row.tags, "ability.weaponcombo"));
+    if (!weapon || !has_tag(hit.tags, "combostep.end")) return;
+    HitSource src;
+    src.type = content::kSourceTypeEffect;
+    src.guid = catalog_->effect_named("Bard_ResonantWeapon")->row.guid;
+    src.confirm = true;
+    src.autonomous = false;
+    std::vector<const abilities::ResonantWeaponRule*> matching;
+    bool damaging = false;
+    for (const abilities::ResonantWeaponRule& rule : catalog_->resonant_weapon_rules()) {
+        if (rule.trigger != abilities::ResonantWeaponRule::Trigger::ComboEnd || rule.damaging_cost) continue;
+        if (rule.melody_effect_guid != 0 && stacks_of(rule.melody_effect_guid) != 1) continue;
+        matching.push_back(&rule);
+        damaging = damaging || (rule.targets_bitmask & 8) != 0;
+    }
+    // All matching reactions see the stacks before the damage reactions' shared cost.
+    for (const auto* rule : matching) {
+        if (const HitDef* root = catalog_->hit(rule->root_hit_guid)) {
+            run_proc_hit(c, *root, {(rule->targets_bitmask & 1) != 0, (rule->targets_bitmask & 8) != 0 ? targets : std::vector<uint64_t>{}}, t, src);
+        }
+    }
+    if (damaging) {
+        for (const auto& rule : catalog_->resonant_weapon_rules()) {
+            if (!rule.damaging_cost) continue;
+            if (const HitDef* cost = catalog_->hit(rule.root_hit_guid)) run_proc_hit(c, *cost, {true, {}}, t, src);
+        }
     }
 }
 
@@ -1174,8 +1525,48 @@ double AbilityPipeline::movement_allowance(double now) const {
 // ---- regeneration -----------------------------------------------------------------------------------------------------------------------
 
 void AbilityPipeline::set_dead(bool dead) {
+    a7_.set_dead(dead, now_);
+    if (dead_ == dead) return;
     dead_ = dead;
-    if (dead) casts_.clear();
+    if (!dead) return;
+    casts_.clear();
+    records_.clear();
+    held_.clear();
+    proc_hits_.clear();
+    instances_.clear();
+    movement_.clear();
+    last_item_at_ = -1;
+
+    AbilityChange c;
+    if (item_instance_) {
+        c.abilities_removed.push_back(*item_instance_);
+        item_instance_.reset();
+    }
+    for (size_t i = 0; i < effects_.size();) {
+        if (effects_[i].def->row.persists_through_death) {
+            effects_[i].zone = 0;   // a retained effect no longer belongs to the fading zone
+            ++i;
+        } else {
+            // Death is not a timed expiry: running an End hit here can apply
+            // another transient effect or heal the character which just died.
+            remove_instance(c, i);
+        }
+    }
+    for (size_t i = 0; i < zones_.size();) {
+        Zone& z = zones_[i];
+        if (z.state == Zone::State::Pending) {
+            zones_.erase(zones_.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        if (z.state == Zone::State::Open) {
+            z.state = Zone::State::Ended;
+            z.fade_at = now_ + kZoneFadeDelay;
+            z.close_at = now_ + kZoneCloseDelay;
+        }
+        ++i;
+    }
+    recompute(c);
+    emit({std::move(c), std::nullopt, now_, "death ends the transient ability state"});
 }
 
 void AbilityPipeline::regenerate(double t) {
@@ -1217,7 +1608,7 @@ void AbilityPipeline::regenerate(double t) {
 double AbilityPipeline::next_due() const {
     double due = next_regen_;
     for (const Cast& c : casts_) {
-        for (const std::optional<double>* d : {&c.item_due, &c.cost_due, &c.hit_due, &c.projectile_due, &c.loop_due, &c.own_due}) {
+        for (const std::optional<double>* d : {&c.item_due, &c.cost_due, &c.hit_due, &c.projectile_due, &c.loop_due, &c.own_due, &c.held_end_due}) {
             if (*d) due = std::min(due, **d);
         }
     }
@@ -1235,6 +1626,7 @@ double AbilityPipeline::next_due() const {
         if (g.timer_end >= 0) due = std::min(due, g.timer_end);
     }
     for (const Zone& z : zones_) due = std::min(due, zone_due(z));
+    for (const ProcHit& hit : proc_hits_) due = std::min(due, hit.due);
     return due;
 }
 
@@ -1256,8 +1648,15 @@ void AbilityPipeline::tick(double now) { advance(now); }
 
 void AbilityPipeline::run_due(double t) {
     clock_ = t;
+    for (size_t i = 0; i < proc_hits_.size(); ++i) {
+        if (proc_hits_[i].due <= t) return run_proc_due(i, t);
+    }
     for (size_t i = 0; i < casts_.size(); ++i) {
         Cast& cast = casts_[i];
+        if (cast.held_end_due && *cast.held_end_due <= t) {
+            held_.push_back({cast.client_id, cast.def->row.guid, cast.held_end_due});
+            return end_held(held_.size() - 1, t);
+        }
         if (cast.item_due && *cast.item_due <= t) {
             cast.item_due.reset();
             step_item(cast, t);
@@ -1331,7 +1730,8 @@ void AbilityPipeline::run_due(double t) {
 
 void AbilityPipeline::finish_cast_if_done(size_t index) {
     const Cast& c = casts_[index];
-    if (!c.item_due && !c.cost_due && !c.hit_due && !c.projectile_due && !c.loop_due && !c.own_due) casts_.erase(casts_.begin() + static_cast<std::ptrdiff_t>(index));
+    if (!c.item_due && !c.cost_due && !c.hit_due && !c.projectile_due && !c.loop_due && !c.own_due && !c.held_end_due)
+        casts_.erase(casts_.begin() + static_cast<std::ptrdiff_t>(index));
 }
 
 // ---- the cast ---------------------------------------------------------------------------------------------------------------------------
@@ -1468,6 +1868,10 @@ AbilityPipeline::HitVerdict AbilityPipeline::hit_request(int64_t ability, int64_
 }
 
 void AbilityPipeline::run_slot(CastRecord& rec, HitSlot& slot, double t, bool response, bool found, const std::vector<uint64_t>& targets) {
+    if (found && slot.hit->row.name == "Bard_AddResonance" && resonant_weapon_enabled()) {
+        if (slot.completion_resource_applied) return;
+        slot.completion_resource_applied = true;
+    }
     AbilityChange c;
     const AbilityDef* def = catalog_->ability(rec.ability);
     HitSource src;
@@ -1509,6 +1913,13 @@ bool AbilityPipeline::cancel(int32_t client_instance_id, double now) {
     // a held ability (Guard, Reflect) ends with the key's release: its effects go kHeldEndDelay later
     for (Held& h : held_) {
         if (h.client_id == client_instance_id && !h.end_due) h.end_due = now_ + kHeldEndDelay;
+    }
+    // A release can arrive before step_own registers the held effect. Keep its
+    // deadline with the pending cast so startup cannot lose the key release.
+    for (Cast& cast : casts_) {
+        if (cast.client_id == client_instance_id && cast.def->row.hold_animation &&
+            !cast.own_effects.empty() && !cast.held_end_due)
+            cast.held_end_due = now_ + kHeldEndDelay;
     }
     return std::find(recent_ids_.begin(), recent_ids_.end(), client_instance_id) != recent_ids_.end();
 }
@@ -1939,14 +2350,12 @@ void AbilityPipeline::step_cost(Cast& cast, double t) {
         events_.push_back(std::move(e));
         return;
     }
-    bool spent_mana = false;
     for (const auto& [stat, amount] : cast.stat_costs) {
         take_stat(c, stat, amount);
-        spent_mana = spent_mana || stat == content::kGuidMana;
     }
     for (const auto& [effect, n] : cast.effect_costs) remove_stacks(c, effect, n);
     drop_evaluation();
-    if (resource_ && spent_mana) apply_effect(c, *resource_, 1, std::nullopt, t);   // the class's resource: one stack per cast that spends Mana
+    consume_resonance_ability(c, def, t);
     use_charge(c, cast, t);
     if (cast.toggle_off) {
         end_loop(c, def.row.guid, t);
@@ -1983,7 +2392,8 @@ void AbilityPipeline::step_own(Cast& cast, double t) {
     // a held ability (the key stays down: Guard, Reflect) ends with the client's cancel
     if (def.row.hold_animation) {
         held_.erase(std::remove_if(held_.begin(), held_.end(), [&](const Held& h) { return h.ability == def.row.guid; }), held_.end());
-        held_.push_back({cast.client_id, def.row.guid, std::nullopt});
+        held_.push_back({cast.client_id, def.row.guid, cast.held_end_due});
+        cast.held_end_due.reset();
         if (held_.size() > 16) held_.erase(held_.begin());
     }
     recompute(c);
@@ -1991,8 +2401,11 @@ void AbilityPipeline::step_own(Cast& cast, double t) {
 }
 
 void AbilityPipeline::end_held(size_t index, double t) {
+    const int32_t client_id = held_[index].client_id;
     const int64_t ability = held_[index].ability;
     held_.erase(held_.begin() + static_cast<std::ptrdiff_t>(index));
+    casts_.erase(std::remove_if(casts_.begin(), casts_.end(), [&](const Cast& c) { return c.client_id == client_id; }), casts_.end());
+    drop_record(client_id);
     AbilityChange c;
     end_loop(c, ability, t);
     recompute(c);

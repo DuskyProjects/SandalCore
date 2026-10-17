@@ -31,6 +31,7 @@
 #include "protocol/repl/ability_rpc.h"
 #include "protocol/repl/block_reader.h"
 #include "protocol/repl/fast_array.h"
+#include "protocol/repl/hit_rpc.h"
 #include "protocol/repl/item_rpc.h"
 #include "protocol/repl/move_packed.h"
 #include "protocol/repl/rep_block.h"
@@ -130,8 +131,8 @@ static std::vector<svc::InventoryItem> kit() {
     out.push_back(make_item(Bag, kSwordSlot, fi::kSword2H, 200));
     out.push_back(make_item(Bag, kPotionSlot, fi::kPotion, 201, 5));
     svc::InventoryItem a = make_item(Bag, kMountSlot, g_mount_record, 300);
-    a.persisted_health = 3572;
-    a.persisted_mana = 1;
+    a.persisted_health = 3572.0f;
+    a.persisted_mana = 1.0f;
     out.push_back(a);
     out.push_back(make_item(Bag, kOtherMountSlot, g_other_mount_record, 301));
     svc::InventoryItem locked = make_item(Bag, kLockedSlot, g_mount_record, 302);
@@ -1252,6 +1253,59 @@ static double pawn_health(const Harness& h) {
     return v ? v->value : -1;
 }
 
+static void test_mounted_beneficial_hits() {
+    std::printf("mounted allies receive Health, Mana and Stamina on the rider\n");
+    Harness h(cyb_record());
+    h.play();
+    combat::IncomingHit fatigue;
+    fatigue.hit_guid = 9001;
+    fatigue.mods.push_back({1, content::kGuidStamina, -80});
+    h.s->take_hit(h.conn, fatigue, h.t);
+    h.run(milliseconds(100));
+    CHECK(ride_on(h), "(the player rides with spent Stamina)");
+    if (!h.s->mounted()) return;
+    CHECK(h.s->set_current_value(content::kGuidHealth, 30) && h.s->set_current_value(content::kGuidMana, 10),
+          "(the rider needs healing and Mana)");
+    const auto value = [&](int64_t guid) {
+        if (guid == content::kGuidStamina) return h.s->abilities()->stamina();
+        const stats::StatValue* stat = h.s->character_stats()->find(guid);
+        return stat ? static_cast<double>(stat->value) : -1;
+    };
+    const double health = value(content::kGuidHealth), mana = value(content::kGuidMana), stamina = value(content::kGuidStamina);
+    CHECK(stamina >= 0 && stamina < 70, "(the rider has room for the incoming Stamina)");
+    const double mount_health = h.s->ride()->health();
+    const size_t mount_hits = h.s->mount_hits(), from = h.got.size();
+    combat::IncomingHit support;
+    support.instigator = h.s->bootstrap().setup().guids.pawn.ObjectId;
+    support.hit_guid = 9002;
+    support.source_type = content::kSourceTypeProjectile;
+    support.mods = {{2, content::kGuidHealth, 15}, {3, content::kGuidMana, 10}, {4, content::kGuidStamina, 20}};
+    h.s->take_hit(h.conn, support, h.t);
+    CHECK(within(value(content::kGuidHealth), health + 15, 0.01) && within(value(content::kGuidMana), mana + 10, 0.01) &&
+              within(value(content::kGuidStamina), stamina + 20, 0.01),
+          "the beneficial hit restores all three rider resources immediately");
+    CHECK(h.s->mounted() && h.s->ride()->health() == mount_health && h.s->mount_hits() == mount_hits,
+          "the rider stays mounted and the support hit does not count as damage to the mount");
+    h.run(milliseconds(100));
+    bool confirmed = false;
+    for (const fake::Delivered* delivered : chains_on(h, h.pc_ch, from)) {
+        for (const repl::RpcCall& call : calls_of(*delivered, "AoCPlayerControllerBP_C")) {
+            const auto hits = repl::parse_hit_confirmations(call);
+            if (!hits) continue;
+            for (const repl::HitInstance& hit : hits->hits) {
+                if (hit.record_guid != support.hit_guid) continue;
+                for (const repl::HitTarget& target : hit.targets) {
+                    if (target.stat_mods.size() != 3) continue;
+                    confirmed = within(target.stat_mods[0].effective_value, 15, 0.01) && within(target.stat_mods[1].effective_value, 10, 0.01) &&
+                                within(target.stat_mods[2].effective_value, 20, 0.01);
+                }
+            }
+        }
+    }
+    CHECK(confirmed, "the client receives the rider's actual Health, Mana and Stamina gains");
+    CHECK(!h.s->abilities_failed() && !h.s->failed(), "the session stays healthy after mounted support delivery");
+}
+
 static void test_mounted_combat() {
     std::printf("mounted combat: hits land on the mount, its death, the lock\n");
     Harness h(cyb_record());
@@ -2105,7 +2159,7 @@ static void test_real_roads() {
     std::printf("stage 4: the roads of the area (mapc roads, contentc roads): the real file, and a mount riding along one\n");
     const std::string path = MOUNT_ROADS_PATH;
     const std::vector<RealRoad> roads = read_real_roads(path);
-    CHECK(roads.size() >= 30, "dist/content/roads.tsv holds the area's roads (42 at Wilderness: 11 Artery T1, 31 Lions Hold T2)");
+    CHECK(roads.size() >= 80, "dist/content/roads.tsv holds the current area's roads (91 at Wilderness)");
     if (roads.empty()) return;
     world::RoadMap map;
     std::string error;
@@ -2118,7 +2172,7 @@ static void test_real_roads() {
         for (size_t i = 1; i < r.xy.size(); ++i) metres += std::hypot(r.xy[i].first - r.xy[i - 1].first, r.xy[i].second - r.xy[i - 1].second) / 100.0;
     }
     CHECK(t1 >= 5 && t2 >= 20 && other == 0, "the area's roads are tier 1 (the Riverlands Artery at level 0) and tier 2 (Lions Hold's)");
-    CHECK(metres > 12000.0 && metres < 20000.0, "about 14 km of road in all (8.2 km of spline within 1 km of the centre, the rest near it)");
+    CHECK(metres > 30000.0 && metres < 40000.0, "about 34 km of road in the current area fixture");
     CHECK(narrow >= 500.0, "no road is narrower than half of max(RoadWidth, 1000): the overlap's half width is at least 500 cm");
     // every vertex of every road is on a road of at least its own tier; a point 3 km from all of them is on none
     bool self = true;
@@ -2224,7 +2278,7 @@ static void test_real_roads() {
 }
 // -- Cyb x C | O | A --
 
-int main() {
+int main(int argc, char** argv) {
     spdlog::set_level(std::getenv("AOC_TEST_LOG") ? spdlog::level::debug : spdlog::level::off);
     std::string error;
     {
@@ -2241,6 +2295,12 @@ int main() {
             if (r.kind == "flying" && !g_flying_record) g_flying_record = r.item;
         }
     }
+    if (argc == 2 && std::string(argv[1]) == "--beneficial-hits") {
+        test_mounted_beneficial_hits();
+        test_mounted_combat();
+        std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
+        return g_fail == 0 ? 0 : 1;
+    }
     test_get_on_and_off();
     test_riding_moves();
     test_dash();
@@ -2250,6 +2310,7 @@ int main() {
     test_roads();
     test_repeats_and_desummon();
     test_mounted_combat();
+    test_mounted_beneficial_hits();
     test_health_comes_back_and_is_kept();
     test_filter();
     test_death_and_relog();

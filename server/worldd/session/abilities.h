@@ -210,6 +210,9 @@ public:
     /// counts as standing (nothing is charged) and Stamina regenerates as it does for a standing player.  Getting off changes nothing else: the Sprint does not come back.
     void set_mounted(bool mounted, double now);
     bool mounted() const { return mounted_; }
+    /// Death ends the bridge's transient Sprint, Rest and Evasion state and
+    /// blocks Stamina regeneration. Dodge's cooldown still ends on its timer.
+    void set_dead(bool dead, double now);
 // ~ C | O | A - C.Y.B ~
 
     const content::AbilityRules& rules() const { return rules_; }
@@ -270,6 +273,7 @@ private:
         int32_t client_id;
         int64_t instance;
         double  until;   // the cooldown's end: the ability item and the cooldown item go
+        bool    item_removed = false;   // death already removed the ability item
     };
     struct Evasion {
         int64_t effect_key;
@@ -340,6 +344,7 @@ private:
 
     bool   moving_ = false;
     bool   mounted_ = false;
+    bool   dead_ = false;
     double moving_at_ = 0;
     bool   in_combat_ = false;
     int64_t next_effect_id_ = 0;

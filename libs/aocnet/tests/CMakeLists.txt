@@ -45,6 +45,7 @@ foreach(t
     test_packet_notify
     test_handshake
     test_packet_framing
+    test_packet_reader
     test_server_guid_allocator
     test_generated_schemas
     test_repl_codecs
@@ -73,3 +74,5 @@ foreach(t
 )
     aocnet_add_test(${t})
 endforeach()
+
+target_include_directories(test_sc_packet_info PRIVATE "${PROJECT_SOURCE_DIR}/src/protocol/bootstrap")
